@@ -1,0 +1,12 @@
+__pycache__/
+*.pyc
+*.pyo
+*.db
+*.duckdb
+*.duckdb.wal
+.env
+node_modules/
+dist/
+.vite/
+georisk/backend/data/catalog/*.geojson
+georisk/backend/data/catalog/*.parquet
