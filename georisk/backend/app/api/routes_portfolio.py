@@ -17,12 +17,24 @@ logger = logging.getLogger(__name__)
 router = APIRouter()
 
 
+MAX_UPLOAD_SIZE = 10 * 1024 * 1024  # 10 MB
+
+
+def _sanitize_csv_cell(value):
+    """Prevent CSV formula injection by escaping dangerous prefixes."""
+    if isinstance(value, str) and value and value[0] in ("=", "+", "-", "@", "\t", "\r"):
+        return "'" + value
+    return value
+
+
 @router.post("/upload")
 async def upload_portfolio(file: UploadFile = File(...)):
-    if not file.filename.endswith(".csv"):
+    if not file.filename or not file.filename.lower().endswith(".csv"):
         raise HTTPException(status_code=400, detail="Only CSV files accepted")
 
     content = await file.read()
+    if len(content) > MAX_UPLOAD_SIZE:
+        raise HTTPException(status_code=413, detail="File too large. Maximum size is 10 MB.")
     text = content.decode("utf-8")
     reader = csv.DictReader(io.StringIO(text))
 
@@ -227,7 +239,8 @@ async def export_portfolio_csv(portfolio_id: str):
     writer = csv.DictWriter(output, fieldnames=columns)
     writer.writeheader()
     for r in rows:
-        writer.writerow(dict(zip(columns, r)))
+        row_dict = dict(zip(columns, r))
+        writer.writerow({k: _sanitize_csv_cell(v) for k, v in row_dict.items()})
 
     output.seek(0)
     return StreamingResponse(

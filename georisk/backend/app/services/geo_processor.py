@@ -12,7 +12,10 @@ logger = logging.getLogger(__name__)
 
 
 def load_geojson(filename: str) -> dict | None:
-    filepath = settings.CATALOG_DIR / filename
+    filepath = (settings.CATALOG_DIR / filename).resolve()
+    if not filepath.is_relative_to(settings.CATALOG_DIR.resolve()):
+        logger.warning("Path traversal attempt blocked: %s", filename)
+        return None
     if not filepath.exists():
         return None
     with open(filepath) as f:

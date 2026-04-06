@@ -150,8 +150,8 @@ async def get_event_set_events(
             FROM cat_events
             WHERE {where}
             ORDER BY loss DESC, year ASC, event_index ASC
-            LIMIT {page_size} OFFSET {offset}""",
-        params,
+            LIMIT ? OFFSET ?""",
+        params + [page_size, offset],
     ).fetchall()
     duck.close()
     return {

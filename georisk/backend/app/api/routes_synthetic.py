@@ -3,7 +3,7 @@ import logging
 import uuid
 
 from fastapi import APIRouter, HTTPException, Query
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from app.models.database import get_duckdb_conn
 from app.scrapers.usgs_seismic import estimate_pga_at_point
@@ -42,12 +42,13 @@ async def synthetic_summary(sample_n: int = Query(20000, ge=1000, le=200000)):
     n = min(int(sample_n), int(total))
     # DuckDB SAMPLE currently requires constants in the clause; use ORDER BY random() LIMIT instead.
     rows = duck.execute(
-        f"""
+        """
         SELECT latitude, longitude, tiv, construction_type
         FROM synthetic_properties
         ORDER BY random()
-        LIMIT {n}
-        """
+        LIMIT ?
+        """,
+        [n],
     ).fetchall()
     duck.close()
 
@@ -89,12 +90,13 @@ async def synthetic_sample_points(limit: int = Query(2000, ge=100, le=50000)):
 
     n = int(limit)
     rows = duck.execute(
-        f"""
+        """
         SELECT latitude, longitude, tiv, construction_type, occupancy, year_built, stories
         FROM synthetic_properties
         ORDER BY random()
-        LIMIT {n}
-        """
+        LIMIT ?
+        """,
+        [n],
     ).fetchall()
     duck.close()
 
@@ -132,12 +134,13 @@ async def synthetic_accumulation_hex(resolution: int = Query(5, ge=3, le=7), sam
 
     n = min(int(sample_n), int(total))
     rows = duck.execute(
-        f"""
+        """
         SELECT latitude, longitude, tiv
         FROM synthetic_properties
         ORDER BY random()
-        LIMIT {n}
-        """
+        LIMIT ?
+        """,
+        [n],
     ).fetchall()
     duck.close()
 
@@ -184,8 +187,8 @@ class FilterRequest(BaseModel):
     year_built_max: int | None = None
     stories_min: int | None = None
     stories_max: int | None = None
-    page: int = 1
-    page_size: int = 100
+    page: int = Field(default=1, ge=1)
+    page_size: int = Field(default=100, ge=1, le=1000)
 
 
 def _build_where(f: FilterRequest) -> tuple[str, list]:
@@ -229,8 +232,8 @@ async def filter_synthetic(f: FilterRequest):
         f"""SELECT property_id, latitude, longitude, tiv, construction_type,
                    occupancy, year_built, stories
             FROM synthetic_properties WHERE {where}
-            ORDER BY tiv DESC LIMIT {f.page_size} OFFSET {offset}""",
-        params,
+            ORDER BY tiv DESC LIMIT ? OFFSET ?""",
+        params + [f.page_size, offset],
     ).fetchall()
     duck.close()
     return {
@@ -270,8 +273,8 @@ async def build_portfolio(req: BuildPortfolioRequest):
         duck.execute(
             f"""INSERT INTO cat_portfolio_members (portfolio_id, property_id)
                 SELECT ?, property_id FROM synthetic_properties
-                WHERE {where} ORDER BY tiv DESC LIMIT {req.max_properties}""",
-            [portfolio_id] + params,
+                WHERE {where} ORDER BY tiv DESC LIMIT ?""",
+            [portfolio_id] + params + [req.max_properties],
         )
         count = duck.execute("SELECT COUNT(*) FROM cat_portfolio_members WHERE portfolio_id = ?", [portfolio_id]).fetchone()[0]
     else:
@@ -287,13 +290,13 @@ async def get_cat_portfolio_properties(portfolio_id: str, page: int = Query(1, g
     total = duck.execute("SELECT COUNT(*) FROM cat_portfolio_members WHERE portfolio_id = ?", [portfolio_id]).fetchone()[0]
     offset = (page - 1) * page_size
     rows = duck.execute(
-        f"""SELECT p.property_id, p.latitude, p.longitude, p.tiv,
+        """SELECT p.property_id, p.latitude, p.longitude, p.tiv,
                    p.construction_type, p.occupancy, p.year_built, p.stories
             FROM cat_portfolio_members m
             JOIN synthetic_properties p ON m.property_id = p.property_id
             WHERE m.portfolio_id = ?
-            ORDER BY p.tiv DESC LIMIT {page_size} OFFSET {offset}""",
-        [portfolio_id],
+            ORDER BY p.tiv DESC LIMIT ? OFFSET ?""",
+        [portfolio_id, page_size, offset],
     ).fetchall()
     duck.close()
     return {
@@ -396,13 +399,13 @@ async def synthetic_stats():
 async def portfolio_geojson(portfolio_id: str, limit: int = Query(5000, ge=100, le=50000)):
     duck = get_duckdb_conn()
     rows = duck.execute(
-        f"""SELECT p.property_id, p.latitude, p.longitude, p.tiv,
+        """SELECT p.property_id, p.latitude, p.longitude, p.tiv,
                    p.construction_type, p.occupancy, p.year_built, p.stories
             FROM cat_portfolio_members m
             JOIN synthetic_properties p ON m.property_id = p.property_id
             WHERE m.portfolio_id = ?
-            ORDER BY p.tiv DESC LIMIT {limit}""",
-        [portfolio_id],
+            ORDER BY p.tiv DESC LIMIT ?""",
+        [portfolio_id, limit],
     ).fetchall()
     duck.close()
     features = []
@@ -425,7 +428,7 @@ async def portfolio_geojson(portfolio_id: str, limit: int = Query(5000, ge=100, 
 async def portfolio_scored_geojson(portfolio_id: str, limit: int = Query(5000, ge=100, le=50000)):
     duck = get_duckdb_conn()
     rows = duck.execute(
-        f"""SELECT p.property_id, p.latitude, p.longitude, p.tiv,
+        """SELECT p.property_id, p.latitude, p.longitude, p.tiv,
                    p.construction_type, p.occupancy,
                    COALESCE(SUM(CASE WHEN cr.peril='seismic' THEN cr.aal END), 0) as s_aal,
                    COALESCE(SUM(CASE WHEN cr.peril='flood' THEN cr.aal END), 0) as f_aal,
@@ -436,8 +439,8 @@ async def portfolio_scored_geojson(portfolio_id: str, limit: int = Query(5000, g
             LEFT JOIN cat_results cr ON cr.property_id = p.property_id AND cr.portfolio_id = m.portfolio_id
             WHERE m.portfolio_id = ?
             GROUP BY p.property_id, p.latitude, p.longitude, p.tiv, p.construction_type, p.occupancy
-            ORDER BY total_aal DESC LIMIT {limit}""",
-        [portfolio_id],
+            ORDER BY total_aal DESC LIMIT ?""",
+        [portfolio_id, limit],
     ).fetchall()
     duck.close()
     features = []
