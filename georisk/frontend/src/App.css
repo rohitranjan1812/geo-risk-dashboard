@@ -1367,3 +1367,62 @@ body {
   flex-direction: column;
   gap: 12px;
 }
+
+/* Seed Config */
+.seed-config h2 { font-size: 16px; display: flex; align-items: center; gap: 8px; margin-bottom: 4px; }
+.seed-form { display: flex; flex-direction: column; gap: 8px; }
+.seed-stats-banner {
+  display: flex; flex-direction: column; gap: 2px;
+  padding: 8px 12px; background: rgba(0,229,255,0.08); border: 1px solid rgba(0,229,255,0.2);
+  border-radius: var(--radius); font-size: 11px; color: var(--accent); margin-bottom: 10px;
+}
+
+/* Session History */
+.session-history {}
+.session-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px; }
+.session-header h2 { font-size: 16px; display: flex; align-items: center; gap: 8px; }
+.session-list { display: flex; flex-direction: column; gap: 8px; }
+.session-card {
+  background: var(--bg-card); border: 1px solid var(--border); border-radius: var(--radius);
+  padding: 12px; cursor: pointer; transition: all var(--transition);
+}
+.session-card:hover { border-color: var(--accent); }
+.session-card-top { display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px; }
+.session-name { display: flex; align-items: center; gap: 6px; font-weight: 600; font-size: 13px; }
+.session-status { font-size: 11px; font-weight: 700; text-transform: uppercase; }
+.session-card-stats { display: flex; gap: 10px; font-size: 11px; color: var(--text-secondary); flex-wrap: wrap; }
+.session-card-footer { display: flex; justify-content: space-between; align-items: center; margin-top: 6px; }
+.session-date { font-size: 10px; color: var(--text-muted); }
+.empty-state { text-align: center; padding: 30px 20px; color: var(--text-muted); }
+.empty-state p { margin-bottom: 12px; font-size: 13px; }
+
+/* Map Color Control */
+.map-color-control {
+  background: var(--bg-card); border: 1px solid var(--border); border-radius: var(--radius);
+  padding: 8px 12px; margin-top: 8px; min-width: 200px; backdrop-filter: blur(10px);
+}
+.color-control-header { display: flex; align-items: center; gap: 6px; font-size: 11px; color: var(--text-muted); margin-bottom: 4px; }
+.color-select {
+  width: 100%; background: var(--bg-input); border: 1px solid var(--border);
+  border-radius: 4px; padding: 5px 8px; color: var(--text-primary); font-size: 12px;
+}
+.color-select:focus { outline: none; border-color: var(--accent); }
+
+/* Map Legend */
+.map-legend {
+  position: absolute; bottom: 40px; right: 16px; z-index: 5;
+  background: var(--bg-card); border: 1px solid var(--border); border-radius: var(--radius);
+  padding: 8px 12px; min-width: 180px; backdrop-filter: blur(10px);
+}
+.legend-title { font-size: 11px; font-weight: 600; margin-bottom: 6px; }
+.legend-count { font-weight: 400; color: var(--text-muted); }
+.legend-gradient-row { display: flex; align-items: center; gap: 6px; }
+.legend-gradient-bar { flex: 1; height: 10px; border-radius: 5px; }
+.legend-min, .legend-max { font-size: 10px; color: var(--text-muted); white-space: nowrap; }
+.legend-swatches { display: flex; gap: 10px; }
+.legend-swatch { display: flex; align-items: center; gap: 4px; font-size: 11px; }
+.swatch-dot { width: 10px; height: 10px; border-radius: 50%; }
+
+/* CAT Nav Buttons */
+.cat-nav-buttons { display: flex; gap: 6px; margin-top: 8px; }
+.cat-nav-buttons .btn { flex: 1; justify-content: center; }

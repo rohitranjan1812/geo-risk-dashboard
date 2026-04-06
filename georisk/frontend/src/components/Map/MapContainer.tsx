@@ -6,6 +6,18 @@ import type { Property } from '../../types';
 const STYLE_URL = 'https://basemaps.cartocdn.com/gl/dark-matter-gl-style/style.json';
 const LIGHT_STYLE = 'https://basemaps.cartocdn.com/gl/positron-gl-style/style.json';
 
+export type ColorByField = 'composite_score' | 'seismic_score' | 'flood_score' | 'wind_score' | 'aal' | 'tiv' | 'dominant_peril';
+
+const COLOR_EXPRESSIONS: Record<string, any> = {
+  composite_score: ['interpolate', ['linear'], ['get', 'composite_score'], 0, '#4caf50', 30, '#fdd835', 60, '#ff9800', 80, '#f44336', 100, '#880e4f'],
+  seismic_score: ['interpolate', ['linear'], ['get', 'seismic_score'], 0, '#e8eaf6', 50, '#f44336', 100, '#880e4f'],
+  flood_score: ['interpolate', ['linear'], ['get', 'flood_score'], 0, '#e3f2fd', 50, '#1976d2', 100, '#0d47a1'],
+  wind_score: ['interpolate', ['linear'], ['get', 'wind_score'], 0, '#fff3e0', 50, '#ff9800', 100, '#e65100'],
+  aal: ['interpolate', ['linear'], ['get', 'aal'], 0, '#e3f2fd', 5000, '#ff9800', 50000, '#f44336', 200000, '#880e4f'],
+  tiv: ['interpolate', ['linear'], ['get', 'tiv'], 100000, '#e8f5e9', 1000000, '#fdd835', 5000000, '#ff9800', 15000000, '#f44336'],
+  dominant_peril: ['match', ['get', 'dominant_peril'], 'seismic', '#f44336', 'flood', '#2196f3', 'wind', '#ff9800', '#999999'],
+};
+
 interface MapContainerProps {
   layers: {
     earthquakes: GeoJSON.FeatureCollection | null;
@@ -21,6 +33,10 @@ interface MapContainerProps {
   isDark: boolean;
   enableBboxSelect?: boolean;
   onBboxSelect?: (bbox: [number, number, number, number]) => void;
+  catPropertiesGeoJSON?: GeoJSON.FeatureCollection | null;
+  colorByField?: ColorByField;
+  onCatPropertyClick?: (propertyId: number) => void;
+  aalHeatmapGeoJSON?: GeoJSON.FeatureCollection | null;
 }
 
 export function MapContainer({
@@ -32,6 +48,10 @@ export function MapContainer({
   isDark,
   enableBboxSelect,
   onBboxSelect,
+  catPropertiesGeoJSON,
+  colorByField = 'composite_score',
+  onCatPropertyClick,
+  aalHeatmapGeoJSON,
 }: MapContainerProps) {
   const mapContainer = useRef<HTMLDivElement>(null);
   const map = useRef<maplibregl.Map | null>(null);
@@ -260,6 +280,9 @@ export function MapContainer({
       flood_zones: ['flood-zones-fill', 'flood-zones-outline'],
       hurricane_tracks: ['hurricane-tracks-line'],
       properties: ['properties-circle', 'properties-label'],
+      cat_properties: ['cat-properties-circle'],
+      aal_heatmap: ['aal-heatmap-layer'],
+      portfolio_heat: ['portfolio-heat'],
     };
 
     for (const [key, layerIds] of Object.entries(layerMap)) {
@@ -287,6 +310,77 @@ export function MapContainer({
 
     return () => { marker.remove(); };
   }, [highlightCoords]);
+
+  useEffect(() => {
+    const m = map.current;
+    if (!m || !mapLoaded) return;
+
+    if (catPropertiesGeoJSON) {
+      addOrUpdateSource('cat-properties', catPropertiesGeoJSON);
+      if (!m.getLayer('cat-properties-circle')) {
+        m.addLayer({
+          id: 'cat-properties-circle',
+          type: 'circle',
+          source: 'cat-properties',
+          paint: {
+            'circle-radius': ['interpolate', ['linear'], ['get', 'tiv'], 100000, 4, 1000000, 7, 10000000, 14],
+            'circle-color': COLOR_EXPRESSIONS[colorByField] || COLOR_EXPRESSIONS.composite_score,
+            'circle-opacity': 0.85,
+            'circle-stroke-width': 1,
+            'circle-stroke-color': '#fff',
+          },
+        });
+
+        m.on('click', 'cat-properties-circle', (e) => {
+          if (e.features?.[0] && onCatPropertyClick) {
+            onCatPropertyClick(e.features[0].properties?.id);
+          }
+        });
+        m.on('mouseenter', 'cat-properties-circle', () => { m.getCanvas().style.cursor = 'pointer'; });
+        m.on('mouseleave', 'cat-properties-circle', () => { m.getCanvas().style.cursor = ''; });
+      } else {
+        m.setPaintProperty('cat-properties-circle', 'circle-color',
+          COLOR_EXPRESSIONS[colorByField] || COLOR_EXPRESSIONS.composite_score);
+      }
+    } else {
+      if (m.getLayer('cat-properties-circle')) {
+        m.removeLayer('cat-properties-circle');
+      }
+      if (m.getSource('cat-properties')) {
+        m.removeSource('cat-properties');
+      }
+    }
+  }, [catPropertiesGeoJSON, colorByField, mapLoaded, addOrUpdateSource, onCatPropertyClick]);
+
+  useEffect(() => {
+    const m = map.current;
+    if (!m || !mapLoaded) return;
+
+    if (aalHeatmapGeoJSON) {
+      addOrUpdateSource('aal-heatmap', aalHeatmapGeoJSON);
+      if (!m.getLayer('aal-heatmap-layer')) {
+        m.addLayer({
+          id: 'aal-heatmap-layer',
+          type: 'heatmap',
+          source: 'aal-heatmap',
+          paint: {
+            'heatmap-weight': ['interpolate', ['linear'], ['get', 'aal'], 0, 0, 100000, 1],
+            'heatmap-intensity': 0.8,
+            'heatmap-radius': 25,
+            'heatmap-opacity': 0.6,
+            'heatmap-color': [
+              'interpolate', ['linear'], ['heatmap-density'],
+              0, 'rgba(0,0,0,0)', 0.2, '#2196f3', 0.4, '#4caf50',
+              0.6, '#fdd835', 0.8, '#f44336', 1, '#880e4f',
+            ],
+          },
+        });
+      }
+    } else {
+      if (m.getLayer('aal-heatmap-layer')) m.removeLayer('aal-heatmap-layer');
+      if (m.getSource('aal-heatmap')) m.removeSource('aal-heatmap');
+    }
+  }, [aalHeatmapGeoJSON, mapLoaded, addOrUpdateSource]);
 
   useEffect(() => {
     const m = map.current;

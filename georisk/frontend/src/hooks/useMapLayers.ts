@@ -32,6 +32,9 @@ export function useMapLayers() {
     flood_zones: true,
     hurricane_tracks: true,
     properties: true,
+    cat_properties: true,
+    aal_heatmap: true,
+    portfolio_heat: true,
   });
 
   const [loading, setLoading] = useState(true);

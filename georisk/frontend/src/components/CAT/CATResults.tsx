@@ -13,9 +13,10 @@ interface CATResultsProps {
   portfolioName: string;
   nProperties: number;
   onPropertyClick: (id: number) => void;
+  onModelComplete?: (portfolioId: string) => void;
 }
 
-export function CATResults({ portfolioId, portfolioName, nProperties, onPropertyClick }: CATResultsProps) {
+export function CATResults({ portfolioId, portfolioName, nProperties, onPropertyClick, onModelComplete }: CATResultsProps) {
   const [modelResult, setModelResult] = useState<any>(null);
   const [epData, setEpData] = useState<any>(null);
   const [divData, setDivData] = useState<any>(null);
@@ -35,6 +36,7 @@ export function CATResults({ portfolioId, portfolioName, nProperties, onProperty
       ]);
       setEpData(ep.data);
       setDivData(div.data);
+      if (onModelComplete) onModelComplete(portfolioId);
     } catch (e) {
       console.error(e);
     } finally {

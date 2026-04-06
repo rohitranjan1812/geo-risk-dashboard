@@ -91,3 +91,38 @@ export async function fetchSyntheticAccumulationHex(resolution = 5, sampleN = 20
   const { data } = await api.get(`/synthetic/accumulation-hex?resolution=${resolution}&sample_n=${sampleN}&top_k=${topK}`);
   return data;
 }
+
+export async function fetchSyntheticStats(): Promise<any> {
+  const { data } = await api.get('/synthetic/stats');
+  return data;
+}
+
+export async function seedSynthetic(body: any): Promise<any> {
+  const { data } = await api.post('/synthetic/seed', body);
+  return data;
+}
+
+export async function fetchCATSessions(): Promise<any[]> {
+  const { data } = await api.get('/cat/sessions');
+  return data;
+}
+
+export async function fetchCATSession(sessionId: string): Promise<any> {
+  const { data } = await api.get(`/cat/sessions/${sessionId}`);
+  return data;
+}
+
+export async function deleteCATSession(sessionId: string): Promise<any> {
+  const { data } = await api.delete(`/cat/sessions/${sessionId}`);
+  return data;
+}
+
+export async function fetchPortfolioGeoJSON(portfolioId: string, limit = 5000): Promise<GeoJSON.FeatureCollection> {
+  const { data } = await api.get(`/synthetic/portfolio/${portfolioId}/geojson?limit=${limit}`);
+  return data;
+}
+
+export async function fetchScoredGeoJSON(portfolioId: string, limit = 5000): Promise<GeoJSON.FeatureCollection> {
+  const { data } = await api.get(`/synthetic/portfolio/${portfolioId}/scored-geojson?limit=${limit}`);
+  return data;
+}

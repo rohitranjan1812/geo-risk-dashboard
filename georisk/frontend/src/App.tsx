@@ -1,22 +1,32 @@
 import { useState, useCallback } from 'react';
 import type { Journey, ThemeMode, Property } from './types';
+import type { ColorByField } from './components/Map/MapContainer';
 import { Sidebar } from './components/Dashboard/Sidebar';
 import { MapContainer } from './components/Map/MapContainer';
 import { HazardLayerControls } from './components/Map/HazardLayers';
+import { MapColorControl } from './components/Map/MapColorControl';
+import { MapLegend } from './components/Map/MapLegend';
 import { PropertySearch } from './components/Property/PropertySearch';
 import { RiskScorecard } from './components/Property/RiskScorecard';
 import { StatusPanel } from './components/Dashboard/StatusPanel';
 import { PortfolioUpload } from './components/Portfolio/PortfolioUpload';
 import { PortfolioTable } from './components/Portfolio/PortfolioTable';
 import { PortfolioCharts } from './components/Portfolio/PortfolioCharts';
+import { SeedConfig } from './components/CAT/SeedConfig';
 import { SyntheticBrowser } from './components/CAT/SyntheticBrowser';
+import { SessionHistory } from './components/CAT/SessionHistory';
 import { CATResults } from './components/CAT/CATResults';
 import { LocationDetail } from './components/CAT/LocationDetail';
 import { useMapLayers } from './hooks/useMapLayers';
 import { useRiskQuery } from './hooks/useRiskQuery';
 import { usePortfolio } from './hooks/usePortfolio';
 import { fetchPortfolioAccumulation, fetchSyntheticAccumulationHex, fetchSyntheticSummary } from './api/client';
+import axios from 'axios';
 import './App.css';
+
+const API = 'http://localhost:8000/api';
+
+type CatStep = 'seed' | 'browse' | 'history' | 'results' | 'location';
 
 function App() {
   const [journey, setJourney] = useState<Journey>('explorer');
@@ -26,8 +36,13 @@ function App() {
   const [syntheticInfo, setSyntheticInfo] = useState<any | null>(null);
 
   const [catBbox, setCatBbox] = useState<[number, number, number, number] | null>(null);
+  const [catStep, setCatStep] = useState<CatStep>('history');
   const [catPortfolio, setCatPortfolio] = useState<{ id: string; name: string; count: number } | null>(null);
   const [catLocationId, setCatLocationId] = useState<number | null>(null);
+  const [catPropertiesGeoJSON, setCatPropertiesGeoJSON] = useState<GeoJSON.FeatureCollection | null>(null);
+  const [aalHeatmapGeoJSON, setAalHeatmapGeoJSON] = useState<GeoJSON.FeatureCollection | null>(null);
+  const [colorBy, setColorBy] = useState<ColorByField>('composite_score');
+  const [catModelResult, setCatModelResult] = useState<any>(null);
 
   const { layers, visibility, toggleLayer, reload: reloadLayers } = useMapLayers();
   const {
@@ -61,22 +76,61 @@ function App() {
         const accum = await fetchPortfolioAccumulation(result.portfolio_id);
         setPortfolioGeoJSON(accum);
       } catch (err) {
-        console.error('Failed to load accumulation:', err);
+        console.error(err);
       }
       reloadLayers();
     }
     return result;
   }, [uploadPortfolio, reloadLayers]);
 
-  const toggleTheme = useCallback(() => {
-    setTheme(prev => prev === 'dark' ? 'light' : 'dark');
+  const toggleTheme = useCallback(() => setTheme(prev => prev === 'dark' ? 'light' : 'dark'), []);
+
+  const handleBboxSelect = useCallback((bbox: [number, number, number, number]) => setCatBbox(bbox), []);
+
+  const handleCatPropertyClickFromMap = useCallback((propertyId: number) => {
+    setCatLocationId(propertyId);
+    setCatStep('location');
   }, []);
 
-  const handleBboxSelect = useCallback((bbox: [number, number, number, number]) => {
-    setCatBbox(bbox);
+  const loadPortfolioOnMap = useCallback(async (pid: string) => {
+    try {
+      const { data } = await axios.get(`${API}/synthetic/portfolio/${pid}/geojson?limit=5000`);
+      setCatPropertiesGeoJSON(data);
+    } catch (e) {
+      console.error(e);
+    }
   }, []);
+
+  const loadScoredOnMap = useCallback(async (pid: string) => {
+    try {
+      const { data } = await axios.get(`${API}/synthetic/portfolio/${pid}/scored-geojson?limit=5000`);
+      setCatPropertiesGeoJSON(data);
+      setAalHeatmapGeoJSON(data);
+    } catch (e) {
+      console.error(e);
+    }
+  }, []);
+
+  const handlePortfolioCreated = useCallback((id: string, name: string, count: number) => {
+    setCatPortfolio({ id, name, count });
+    loadPortfolioOnMap(id);
+    setCatStep('results');
+  }, [loadPortfolioOnMap]);
+
+  const handleLoadSession = useCallback((session: any) => {
+    const s = session.session;
+    setCatPortfolio({ id: s.portfolio_id, name: s.name, count: s.n_properties });
+    setCatModelResult(session);
+    loadScoredOnMap(s.portfolio_id);
+    setCatStep('results');
+  }, [loadScoredOnMap]);
+
+  const handleModelComplete = useCallback((pid: string) => {
+    loadScoredOnMap(pid);
+  }, [loadScoredOnMap]);
 
   const isCatMode = journey === 'cat';
+  const catPointCount = catPropertiesGeoJSON?.features?.length || 0;
 
   return (
     <div className={`app ${theme}`}>
@@ -93,14 +147,18 @@ function App() {
             isDark={theme === 'dark'}
             enableBboxSelect={isCatMode}
             onBboxSelect={handleBboxSelect}
+            catPropertiesGeoJSON={isCatMode ? catPropertiesGeoJSON : null}
+            colorByField={colorBy}
+            onCatPropertyClick={handleCatPropertyClickFromMap}
+            aalHeatmapGeoJSON={isCatMode ? aalHeatmapGeoJSON : null}
           />
           <div className="map-overlay-controls">
-            <HazardLayerControls visibility={visibility} onToggle={toggleLayer} />
+            <HazardLayerControls visibility={visibility} onToggle={toggleLayer} showCatLayers={isCatMode} />
+            <MapColorControl value={colorBy} onChange={setColorBy} visible={isCatMode && catPointCount > 0} />
           </div>
-          {isCatMode && (
-            <div className="map-overlay-hint">
-              Shift + drag to select area
-            </div>
+          <MapLegend colorBy={colorBy} count={catPointCount} visible={isCatMode && catPointCount > 0} />
+          {isCatMode && catStep === 'browse' && (
+            <div className="map-overlay-hint">Shift + drag to select area</div>
           )}
         </div>
 
@@ -150,28 +208,47 @@ function App() {
 
           {journey === 'cat' && (
             <div className="cat-panel">
-              {catLocationId ? (
-                <LocationDetail propertyId={catLocationId} onClose={() => setCatLocationId(null)} />
-              ) : catPortfolio ? (
-                <CATResults
-                  portfolioId={catPortfolio.id}
-                  portfolioName={catPortfolio.name}
-                  nProperties={catPortfolio.count}
-                  onPropertyClick={(id) => setCatLocationId(id)}
-                />
+              {catStep === 'location' && catLocationId ? (
+                <>
+                  <LocationDetail propertyId={catLocationId} onClose={() => { setCatLocationId(null); setCatStep(catPortfolio ? 'results' : 'browse'); }} />
+                </>
+              ) : catStep === 'results' && catPortfolio ? (
+                <>
+                  <CATResults
+                    portfolioId={catPortfolio.id}
+                    portfolioName={catPortfolio.name}
+                    nProperties={catPortfolio.count}
+                    onPropertyClick={(id) => { setCatLocationId(id); setCatStep('location'); }}
+                    onModelComplete={handleModelComplete}
+                  />
+                  <div className="cat-nav-buttons">
+                    <button className="btn btn-outline btn-sm" onClick={() => setCatStep('history')}>Session History</button>
+                    <button className="btn btn-outline btn-sm" onClick={() => { setCatPortfolio(null); setCatPropertiesGeoJSON(null); setAalHeatmapGeoJSON(null); setCatStep('browse'); }}>New Portfolio</button>
+                  </div>
+                </>
+              ) : catStep === 'seed' ? (
+                <>
+                  <SeedConfig bbox={catBbox} onClearBbox={() => setCatBbox(null)} onSeeded={() => setCatStep('browse')} />
+                  <button className="btn btn-outline btn-sm" style={{ marginTop: 8, width: '100%' }} onClick={() => setCatStep('history')}>Back to History</button>
+                </>
+              ) : catStep === 'browse' ? (
+                <>
+                  <SyntheticBrowser
+                    bbox={catBbox}
+                    onClearBbox={() => setCatBbox(null)}
+                    onPortfolioCreated={handlePortfolioCreated}
+                    onPropertyClick={(id) => { setCatLocationId(id); setCatStep('location'); }}
+                  />
+                  <div className="cat-nav-buttons">
+                    <button className="btn btn-outline btn-sm" onClick={() => setCatStep('seed')}>Re-seed Properties</button>
+                    <button className="btn btn-outline btn-sm" onClick={() => setCatStep('history')}>Session History</button>
+                  </div>
+                </>
               ) : (
-                <SyntheticBrowser
-                  bbox={catBbox}
-                  onClearBbox={() => setCatBbox(null)}
-                  onPortfolioCreated={(id, name, count) => setCatPortfolio({ id, name, count })}
-                  onPropertyClick={(id) => setCatLocationId(id)}
+                <SessionHistory
+                  onLoadSession={handleLoadSession}
+                  onNewAnalysis={() => setCatStep('browse')}
                 />
-              )}
-              {(catPortfolio || catLocationId) && !catLocationId && (
-                <button className="btn btn-outline" style={{ marginTop: 8, width: '100%' }}
-                  onClick={() => { setCatPortfolio(null); setCatLocationId(null); }}>
-                  Back to Browser
-                </button>
               )}
             </div>
           )}

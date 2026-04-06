@@ -3,7 +3,10 @@ CAT modelling API routes.
 Provides stochastic simulation, location-level HVE drill-down,
 EP curves, technical pricing, and diversification.
 """
+import json
 import logging
+import uuid as _uuid
+from datetime import datetime, timezone
 from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel
 
@@ -91,9 +94,23 @@ async def run_cat_model(req: RunModelRequest):
                  pb.get("oep_100", 0), pb.get("oep_250", 0), pb.get("oep_500", 0),
                  pb.get("technical_rate_pct", 0), pb.get("loaded_rate_pct", 0), 0],
             )
+    session_id = str(_uuid.uuid4())[:8]
+    now_ts = datetime.now(timezone.utc).isoformat()
+    pname_row = duck.execute("SELECT name FROM cat_portfolios WHERE portfolio_id = ?", [req.portfolio_id]).fetchone()
+    session_name = pname_row[0] if pname_row else req.portfolio_id
+    duck.execute(
+        """INSERT INTO cat_sessions (session_id, portfolio_id, name, status, portfolio_tiv,
+           portfolio_aal, portfolio_premium, n_properties, model_config, created_at, completed_at)
+           VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
+        [session_id, req.portfolio_id, session_name, "modelled",
+         round(portfolio_tiv, 2), round(portfolio_aal, 2), round(portfolio_premium, 2),
+         len(all_results), json.dumps({"n_years": req.n_years, "max_properties": req.max_properties}),
+         now_ts, now_ts],
+    )
     duck.close()
 
     return {
+        "session_id": session_id,
         "portfolio_id": req.portfolio_id,
         "n_properties": len(all_results),
         "n_years": req.n_years,
@@ -327,3 +344,70 @@ async def get_diversification(portfolio_id: str, return_period: int = Query(250)
         })
 
     return compute_diversification(property_results, return_period=return_period)
+
+
+@router.get("/sessions")
+async def list_sessions():
+    duck = get_duckdb_conn()
+    rows = duck.execute(
+        """SELECT session_id, portfolio_id, name, status, portfolio_tiv,
+                  portfolio_aal, portfolio_premium, n_properties, model_config,
+                  created_at, completed_at
+           FROM cat_sessions ORDER BY created_at DESC"""
+    ).fetchall()
+    cols = [d[0] for d in duck.description] if duck.description else []
+    duck.close()
+    return [dict(zip(cols, r)) for r in rows]
+
+
+@router.get("/sessions/{session_id}")
+async def get_session(session_id: str):
+    duck = get_duckdb_conn()
+    row = duck.execute("SELECT * FROM cat_sessions WHERE session_id = ?", [session_id]).fetchone()
+    if not row:
+        duck.close()
+        raise HTTPException(status_code=404, detail="Session not found")
+    cols = [d[0] for d in duck.description]
+    session = dict(zip(cols, row))
+    pid = session["portfolio_id"]
+
+    results = duck.execute(
+        """SELECT property_id, peril, aal, oep_100, oep_250, oep_500, technical_rate, loaded_rate
+           FROM cat_results WHERE portfolio_id = ? ORDER BY aal DESC""",
+        [pid],
+    ).fetchall()
+    rcols = [d[0] for d in duck.description]
+
+    props = duck.execute(
+        """SELECT p.property_id, p.latitude, p.longitude, p.tiv, p.construction_type, p.occupancy
+           FROM cat_portfolio_members m
+           JOIN synthetic_properties p ON m.property_id = p.property_id
+           WHERE m.portfolio_id = ?
+           ORDER BY p.tiv DESC LIMIT 500""",
+        [pid],
+    ).fetchall()
+    duck.close()
+
+    return {
+        "session": session,
+        "results": [dict(zip(rcols, r)) for r in results],
+        "properties": [
+            {"property_id": int(p[0]), "latitude": float(p[1]), "longitude": float(p[2]),
+             "tiv": float(p[3]), "construction_type": str(p[4]), "occupancy": str(p[5])}
+            for p in props
+        ],
+    }
+
+
+@router.delete("/sessions/{session_id}")
+async def delete_session(session_id: str):
+    duck = get_duckdb_conn()
+    row = duck.execute("SELECT portfolio_id FROM cat_sessions WHERE session_id = ?", [session_id]).fetchone()
+    if not row:
+        duck.close()
+        raise HTTPException(status_code=404, detail="Session not found")
+    pid = row[0]
+    duck.execute("DELETE FROM cat_results WHERE portfolio_id = ?", [pid])
+    duck.execute("DELETE FROM cat_sessions WHERE session_id = ?", [session_id])
+    duck.close()
+    return {"status": "deleted", "session_id": session_id}
