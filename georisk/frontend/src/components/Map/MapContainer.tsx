@@ -35,8 +35,12 @@ interface MapContainerProps {
   onBboxSelect?: (bbox: [number, number, number, number]) => void;
   catPropertiesGeoJSON?: GeoJSON.FeatureCollection | null;
   colorByField?: ColorByField;
-  onCatPropertyClick?: (propertyId: number) => void;
+  onCatPropertyClick?: (propertyId: number, coords?: [number, number]) => void;
   aalHeatmapGeoJSON?: GeoJSON.FeatureCollection | null;
+  selectedCatPropertyId?: number | null;
+  selectedCatCoords?: [number, number] | null;
+  selectedCatIds?: number[];
+  onCatBoxSelectIds?: (ids: number[], bbox: [number, number, number, number]) => void;
 }
 
 export function MapContainer({
@@ -52,6 +56,10 @@ export function MapContainer({
   colorByField = 'composite_score',
   onCatPropertyClick,
   aalHeatmapGeoJSON,
+  selectedCatPropertyId = null,
+  selectedCatCoords = null,
+  selectedCatIds = [],
+  onCatBoxSelectIds,
 }: MapContainerProps) {
   const mapContainer = useRef<HTMLDivElement>(null);
   const map = useRef<maplibregl.Map | null>(null);
@@ -84,9 +92,12 @@ export function MapContainer({
   }, []);
 
   useEffect(() => {
-    if (!map.current || !mapLoaded) return;
-    map.current.setStyle(isDark ? STYLE_URL : LIGHT_STYLE);
-    map.current.once('style.load', () => setMapLoaded(true));
+    const m = map.current;
+    if (!m || !mapLoaded) return;
+    // Changing style clears sources/layers; force effects to re-run.
+    setMapLoaded(false);
+    m.setStyle(isDark ? STYLE_URL : LIGHT_STYLE);
+    m.once('style.load', () => setMapLoaded(true));
   }, [isDark]);
 
   const addOrUpdateSource = useCallback(
@@ -333,7 +344,14 @@ export function MapContainer({
 
         m.on('click', 'cat-properties-circle', (e) => {
           if (e.features?.[0] && onCatPropertyClick) {
-            onCatPropertyClick(e.features[0].properties?.id);
+            const f = e.features[0];
+            const id = f.properties?.id;
+            const coords = (f.geometry as GeoJSON.Point).coordinates;
+            if (typeof id === 'number' && Array.isArray(coords) && coords.length >= 2) {
+              onCatPropertyClick(id, [coords[0], coords[1]]);
+            } else if (typeof id === 'number') {
+              onCatPropertyClick(id);
+            }
           }
         });
         m.on('mouseenter', 'cat-properties-circle', () => { m.getCanvas().style.cursor = 'pointer'; });
@@ -346,11 +364,71 @@ export function MapContainer({
       if (m.getLayer('cat-properties-circle')) {
         m.removeLayer('cat-properties-circle');
       }
+      if (m.getLayer('cat-properties-selected')) {
+        m.removeLayer('cat-properties-selected');
+      }
       if (m.getSource('cat-properties')) {
         m.removeSource('cat-properties');
       }
     }
   }, [catPropertiesGeoJSON, colorByField, mapLoaded, addOrUpdateSource, onCatPropertyClick]);
+
+  useEffect(() => {
+    const m = map.current;
+    if (!m || !mapLoaded) return;
+    if (!catPropertiesGeoJSON) return;
+    if (!m.getLayer('cat-properties-circle')) return;
+
+    const hasSelected = typeof selectedCatPropertyId === 'number';
+
+    if (hasSelected) {
+      if (!m.getLayer('cat-properties-selected')) {
+        // Put selected ring above base layer.
+        m.addLayer({
+          id: 'cat-properties-selected',
+          type: 'circle',
+          source: 'cat-properties',
+          filter: ['==', ['get', 'id'], selectedCatPropertyId],
+          paint: {
+            'circle-radius': ['+', ['interpolate', ['linear'], ['get', 'tiv'], 100000, 4, 1000000, 7, 10000000, 14], 4],
+            'circle-color': 'rgba(0,0,0,0)',
+            'circle-stroke-width': 3,
+            'circle-stroke-color': '#00e5ff',
+            'circle-opacity': 1,
+          },
+        });
+      } else {
+        m.setFilter('cat-properties-selected', ['==', ['get', 'id'], selectedCatPropertyId]);
+      }
+    } else if (m.getLayer('cat-properties-selected')) {
+      m.removeLayer('cat-properties-selected');
+    }
+  }, [catPropertiesGeoJSON, mapLoaded, selectedCatPropertyId]);
+
+  useEffect(() => {
+    const m = map.current;
+    if (!m || !mapLoaded) return;
+    if (!m.getLayer('cat-properties-circle')) return;
+
+    const ids = (selectedCatIds || []).filter((x) => typeof x === 'number');
+    if (ids.length === 0) {
+      m.setPaintProperty('cat-properties-circle', 'circle-opacity', 0.85);
+      return;
+    }
+    // Dim non-selected points when we have a multi-selection.
+    m.setPaintProperty('cat-properties-circle', 'circle-opacity', [
+      'case',
+      ['in', ['get', 'id'], ['literal', ids]],
+      0.95,
+      0.18,
+    ]);
+  }, [mapLoaded, selectedCatIds]);
+
+  useEffect(() => {
+    const m = map.current;
+    if (!m || !selectedCatCoords) return;
+    m.flyTo({ center: selectedCatCoords, zoom: 10, duration: 900 });
+  }, [selectedCatCoords]);
 
   useEffect(() => {
     const m = map.current;
@@ -413,13 +491,40 @@ export function MapContainer({
 
       const onMouseUp = (ev: maplibregl.MapMouseEvent) => {
         m.dragPan.enable();
+        const startPt = start ? m.project(start) : null;
+        const curPt = m.project(ev.lngLat);
         if (start && onBboxSelect) {
           const west = Math.min(start.lng, ev.lngLat.lng);
           const south = Math.min(start.lat, ev.lngLat.lat);
           const east = Math.max(start.lng, ev.lngLat.lng);
           const north = Math.max(start.lat, ev.lngLat.lat);
           if (Math.abs(east - west) > 0.01 && Math.abs(north - south) > 0.01) {
-            onBboxSelect([west, south, east, north]);
+            const bboxLngLat: [number, number, number, number] = [west, south, east, north];
+            onBboxSelect(bboxLngLat);
+
+            if (startPt && onCatBoxSelectIds && m.getLayer('cat-properties-circle')) {
+              const minX = Math.min(startPt.x, curPt.x);
+              const maxX = Math.max(startPt.x, curPt.x);
+              const minY = Math.min(startPt.y, curPt.y);
+              const maxY = Math.max(startPt.y, curPt.y);
+              const feats = m.queryRenderedFeatures(
+                [
+                  [minX, minY],
+                  [maxX, maxY],
+                ],
+                { layers: ['cat-properties-circle'] }
+              ) as any[];
+              const ids: number[] = [];
+              const seen = new Set<number>();
+              for (const f of feats || []) {
+                const id = f?.properties?.id;
+                if (typeof id === 'number' && !seen.has(id)) {
+                  seen.add(id);
+                  ids.push(id);
+                }
+              }
+              onCatBoxSelectIds(ids, bboxLngLat);
+            }
           }
         }
         if (box) { box.remove(); box = null; }
@@ -434,7 +539,7 @@ export function MapContainer({
 
     m.on('mousedown', onMouseDown as any);
     return () => { m.off('mousedown', onMouseDown as any); };
-  }, [enableBboxSelect, onBboxSelect, mapLoaded]);
+  }, [enableBboxSelect, onBboxSelect, onCatBoxSelectIds, mapLoaded]);
 
   return <div ref={mapContainer} className="map-container" />;
 }

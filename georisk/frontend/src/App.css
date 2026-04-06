@@ -670,6 +670,14 @@ body {
   background: var(--bg-input);
 }
 
+.portfolio-table tr.row-selected td {
+  background: rgba(0, 229, 255, 0.10);
+}
+
+.portfolio-table tr.row-selected:hover td {
+  background: rgba(0, 229, 255, 0.14);
+}
+
 .score-cell {
   display: flex;
   align-items: center;

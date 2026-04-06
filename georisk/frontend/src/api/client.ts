@@ -126,3 +126,21 @@ export async function fetchScoredGeoJSON(portfolioId: string, limit = 5000): Pro
   const { data } = await api.get(`/synthetic/portfolio/${portfolioId}/scored-geojson?limit=${limit}`);
   return data;
 }
+
+export async function fetchCatEventSets(sessionId: string, propertyId?: number): Promise<any[]> {
+  const qs = new URLSearchParams({ session_id: sessionId });
+  if (typeof propertyId === 'number') qs.set('property_id', String(propertyId));
+  const { data } = await api.get(`/cat/event-sets?${qs.toString()}`);
+  return data;
+}
+
+export async function fetchCatEventSet(eventSetId: string): Promise<any> {
+  const { data } = await api.get(`/cat/event-set/${eventSetId}`);
+  return data;
+}
+
+export async function fetchCatEventSetEvents(eventSetId: string, params: any): Promise<any> {
+  const qs = new URLSearchParams(params || {});
+  const { data } = await api.get(`/cat/event-set/${eventSetId}/events?${qs.toString()}`);
+  return data;
+}

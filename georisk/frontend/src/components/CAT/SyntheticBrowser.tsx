@@ -12,10 +12,11 @@ interface SyntheticBrowserProps {
   bbox: [number, number, number, number] | null;
   onClearBbox: () => void;
   onPortfolioCreated: (portfolioId: string, name: string, count: number) => void;
+  selectedPropertyId?: number | null;
   onPropertyClick: (propertyId: number) => void;
 }
 
-export function SyntheticBrowser({ bbox, onClearBbox, onPortfolioCreated, onPropertyClick }: SyntheticBrowserProps) {
+export function SyntheticBrowser({ bbox, onClearBbox, onPortfolioCreated, selectedPropertyId, onPropertyClick }: SyntheticBrowserProps) {
   const [results, setResults] = useState<any[]>([]);
   const [total, setTotal] = useState(0);
   const [page, setPage] = useState(1);
@@ -168,7 +169,12 @@ export function SyntheticBrowser({ bbox, onClearBbox, onPortfolioCreated, onProp
               </thead>
               <tbody>
                 {results.map(r => (
-                  <tr key={r.property_id} onClick={() => onPropertyClick(r.property_id)} style={{ cursor: 'pointer' }}>
+                  <tr
+                    key={r.property_id}
+                    onClick={() => onPropertyClick(r.property_id)}
+                    style={{ cursor: 'pointer' }}
+                    className={selectedPropertyId === r.property_id ? 'row-selected' : ''}
+                  >
                     <td onClick={e => e.stopPropagation()}>
                       <input type="checkbox" checked={selectAll || selectedIds.has(r.property_id)} onChange={() => toggleId(r.property_id)} />
                     </td>

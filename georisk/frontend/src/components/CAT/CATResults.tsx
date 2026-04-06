@@ -12,16 +12,32 @@ interface CATResultsProps {
   portfolioId: string;
   portfolioName: string;
   nProperties: number;
+  selectedPropertyId?: number | null;
+  selectedIds?: number[];
   onPropertyClick: (id: number) => void;
   onModelComplete?: (portfolioId: string) => void;
+  onSessionCreated?: (sessionId: string) => void;
 }
 
-export function CATResults({ portfolioId, portfolioName, nProperties, onPropertyClick, onModelComplete }: CATResultsProps) {
+export function CATResults({
+  portfolioId,
+  portfolioName,
+  nProperties,
+  selectedPropertyId,
+  selectedIds,
+  onPropertyClick,
+  onModelComplete,
+  onSessionCreated,
+}: CATResultsProps) {
   const [modelResult, setModelResult] = useState<any>(null);
   const [epData, setEpData] = useState<any>(null);
   const [divData, setDivData] = useState<any>(null);
   const [running, setRunning] = useState(false);
   const [activeTab, setActiveTab] = useState<'overview' | 'pricing' | 'diversification' | 'ep'>('overview');
+  const [aalMin, setAalMin] = useState('');
+  const [aalMax, setAalMax] = useState('');
+  const [techMin, setTechMin] = useState('');
+  const [techMax, setTechMax] = useState('');
 
   const runModel = async () => {
     setRunning(true);
@@ -30,6 +46,7 @@ export function CATResults({ portfolioId, portfolioName, nProperties, onProperty
         portfolio_id: portfolioId, n_years: 10000, max_properties: Math.min(nProperties, 200),
       });
       setModelResult(data);
+      if (onSessionCreated && data?.session_id) onSessionCreated(String(data.session_id));
       const [ep, div] = await Promise.all([
         axios.get(`${API}/cat/ep-curve/${portfolioId}?n_years=5000&max_properties=100`),
         axios.get(`${API}/cat/diversification/${portfolioId}?return_period=250`),
@@ -46,12 +63,23 @@ export function CATResults({ portfolioId, portfolioName, nProperties, onProperty
 
   const fmt = (v: number) => v >= 1e6 ? `$${(v / 1e6).toFixed(1)}M` : v >= 1e3 ? `$${(v / 1e3).toFixed(0)}K` : `$${v.toFixed(0)}`;
 
+  const selectionCount = (selectedIds || []).length;
+  const parsedAalMin = aalMin ? parseFloat(aalMin) : null;
+  const parsedAalMax = aalMax ? parseFloat(aalMax) : null;
+  const parsedTechMin = techMin ? parseFloat(techMin) : null;
+  const parsedTechMax = techMax ? parseFloat(techMax) : null;
+
   return (
     <div className="cat-results">
       <div className="cat-results-header">
         <div>
           <h2>{portfolioName}</h2>
           <span className="text-muted">{nProperties} properties | ID: {portfolioId}</span>
+          {selectionCount > 0 && (
+            <div className="text-muted" style={{ fontSize: 12, marginTop: 4 }}>
+              Active selection: {selectionCount.toLocaleString()} point(s)
+            </div>
+          )}
         </div>
         <button className="btn btn-primary" onClick={runModel} disabled={running}>
           {running ? <LoadingSpinner size={14} text="Running 10K-yr sim..." /> : <><Play size={14} /> Run CAT Model</>}
@@ -98,14 +126,41 @@ export function CATResults({ portfolioId, portfolioName, nProperties, onProperty
 
           {activeTab === 'pricing' && (
             <div className="cat-pricing-tab">
+              <div className="filter-grid" style={{ marginBottom: 10 }}>
+                <div className="filter-row">
+                  <label>AAL Min</label>
+                  <input type="number" value={aalMin} onChange={(e) => setAalMin(e.target.value)} placeholder="0" />
+                  <label>Max</label>
+                  <input type="number" value={aalMax} onChange={(e) => setAalMax(e.target.value)} placeholder="any" />
+                </div>
+                <div className="filter-row">
+                  <label>Tech % Min</label>
+                  <input type="number" value={techMin} onChange={(e) => setTechMin(e.target.value)} placeholder="0" />
+                  <label>Max</label>
+                  <input type="number" value={techMax} onChange={(e) => setTechMax(e.target.value)} placeholder="any" />
+                </div>
+              </div>
               <div className="table-scroll" style={{ maxHeight: 400 }}>
                 <table className="portfolio-table">
                   <thead><tr><th>#</th><th>Property</th><th>TIV</th><th>AAL</th><th>Tech Rate</th><th>Loaded Rate</th><th>Premium</th><th>PML-250</th></tr></thead>
                   <tbody>
                     {modelResult.properties
                       .sort((a: any, b: any) => b.total_aal - a.total_aal)
+                      .filter((p: any) => {
+                        if (parsedAalMin != null && p.total_aal < parsedAalMin) return false;
+                        if (parsedAalMax != null && p.total_aal > parsedAalMax) return false;
+                        if (parsedTechMin != null && p.technical_rate_pct < parsedTechMin) return false;
+                        if (parsedTechMax != null && p.technical_rate_pct > parsedTechMax) return false;
+                        if (selectionCount > 0 && !(selectedIds || []).includes(p.property_id)) return false;
+                        return true;
+                      })
                       .map((p: any, i: number) => (
-                        <tr key={p.property_id} onClick={() => onPropertyClick(p.property_id)} style={{ cursor: 'pointer' }}>
+                        <tr
+                          key={p.property_id}
+                          onClick={() => onPropertyClick(p.property_id)}
+                          style={{ cursor: 'pointer' }}
+                          className={selectedPropertyId === p.property_id ? 'row-selected' : ''}
+                        >
                           <td>{i + 1}</td>
                           <td>{p.property_id}</td>
                           <td>{fmt(p.tiv)}</td>
@@ -130,7 +185,12 @@ export function CATResults({ portfolioId, portfolioName, nProperties, onProperty
                   <thead><tr><th>Property</th><th>Standalone PML</th><th>Marginal PML</th><th>Diversified PML</th><th>Benefit</th><th>Share</th></tr></thead>
                   <tbody>
                     {divData.accounts?.slice(0, 50).map((a: any) => (
-                      <tr key={a.property_id} onClick={() => onPropertyClick(a.property_id)} style={{ cursor: 'pointer' }}>
+                      <tr
+                        key={a.property_id}
+                        onClick={() => onPropertyClick(a.property_id)}
+                        style={{ cursor: 'pointer' }}
+                        className={selectedPropertyId === a.property_id ? 'row-selected' : ''}
+                      >
                         <td>{a.property_id}</td>
                         <td>{fmt(a.standalone_pml)}</td>
                         <td>{fmt(a.marginal_pml)}</td>

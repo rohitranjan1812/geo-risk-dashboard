@@ -1,4 +1,4 @@
-import { useState, useCallback } from 'react';
+import { useState, useCallback, useMemo } from 'react';
 import type { Journey, ThemeMode, Property } from './types';
 import type { ColorByField } from './components/Map/MapContainer';
 import { Sidebar } from './components/Dashboard/Sidebar';
@@ -39,10 +39,16 @@ function App() {
   const [catStep, setCatStep] = useState<CatStep>('history');
   const [catPortfolio, setCatPortfolio] = useState<{ id: string; name: string; count: number } | null>(null);
   const [catLocationId, setCatLocationId] = useState<number | null>(null);
+  const [catActiveSessionId, setCatActiveSessionId] = useState<string | null>(null);
   const [catPropertiesGeoJSON, setCatPropertiesGeoJSON] = useState<GeoJSON.FeatureCollection | null>(null);
   const [aalHeatmapGeoJSON, setAalHeatmapGeoJSON] = useState<GeoJSON.FeatureCollection | null>(null);
   const [colorBy, setColorBy] = useState<ColorByField>('composite_score');
   const [catModelResult, setCatModelResult] = useState<any>(null);
+
+  // CAT selection state (single source of truth for map + sidebar)
+  const [selectedCatPropertyId, setSelectedCatPropertyId] = useState<number | null>(null);
+  const [selectedCatCoords, setSelectedCatCoords] = useState<[number, number] | null>(null);
+  const [selectedCatIds, setSelectedCatIds] = useState<number[]>([]);
 
   const { layers, visibility, toggleLayer, reload: reloadLayers } = useMapLayers();
   const {
@@ -87,9 +93,37 @@ function App() {
 
   const handleBboxSelect = useCallback((bbox: [number, number, number, number]) => setCatBbox(bbox), []);
 
-  const handleCatPropertyClickFromMap = useCallback((propertyId: number) => {
+  const featureIndexById = useMemo(() => {
+    const m = new Map<number, GeoJSON.Feature>();
+    const feats = catPropertiesGeoJSON?.features || [];
+    for (const f of feats) {
+      const id = (f as any)?.properties?.id;
+      if (typeof id === 'number') m.set(id, f as any);
+    }
+    return m;
+  }, [catPropertiesGeoJSON]);
+
+  const selectCatProperty = useCallback((propertyId: number, coords?: [number, number] | null) => {
+    setSelectedCatPropertyId(propertyId);
+    if (coords && coords.length === 2) {
+      setSelectedCatCoords(coords);
+      return;
+    }
+    const f = featureIndexById.get(propertyId);
+    const c = (f?.geometry as any)?.coordinates;
+    if (Array.isArray(c) && c.length >= 2 && typeof c[0] === 'number' && typeof c[1] === 'number') {
+      setSelectedCatCoords([c[0], c[1]]);
+    }
+  }, [featureIndexById]);
+
+  const handleCatPropertyClickFromMap = useCallback((propertyId: number, coords?: [number, number]) => {
+    selectCatProperty(propertyId, coords || null);
     setCatLocationId(propertyId);
     setCatStep('location');
+  }, [selectCatProperty]);
+
+  const handleCatBoxSelectIds = useCallback((ids: number[]) => {
+    setSelectedCatIds(ids);
   }, []);
 
   const loadPortfolioOnMap = useCallback(async (pid: string) => {
@@ -121,6 +155,7 @@ function App() {
     const s = session.session;
     setCatPortfolio({ id: s.portfolio_id, name: s.name, count: s.n_properties });
     setCatModelResult(session);
+    setCatActiveSessionId(s.session_id || null);
     loadScoredOnMap(s.portfolio_id);
     setCatStep('results');
   }, [loadScoredOnMap]);
@@ -151,6 +186,10 @@ function App() {
             colorByField={colorBy}
             onCatPropertyClick={handleCatPropertyClickFromMap}
             aalHeatmapGeoJSON={isCatMode ? aalHeatmapGeoJSON : null}
+            selectedCatPropertyId={isCatMode ? selectedCatPropertyId : null}
+            selectedCatCoords={isCatMode ? selectedCatCoords : null}
+            selectedCatIds={isCatMode ? selectedCatIds : []}
+            onCatBoxSelectIds={isCatMode ? handleCatBoxSelectIds : undefined}
           />
           <div className="map-overlay-controls">
             <HazardLayerControls visibility={visibility} onToggle={toggleLayer} showCatLayers={isCatMode} />
@@ -210,7 +249,11 @@ function App() {
             <div className="cat-panel">
               {catStep === 'location' && catLocationId ? (
                 <>
-                  <LocationDetail propertyId={catLocationId} onClose={() => { setCatLocationId(null); setCatStep(catPortfolio ? 'results' : 'browse'); }} />
+                  <LocationDetail
+                    propertyId={catLocationId}
+                    sessionId={catActiveSessionId}
+                    onClose={() => { setCatLocationId(null); setCatStep(catPortfolio ? 'results' : 'browse'); }}
+                  />
                 </>
               ) : catStep === 'results' && catPortfolio ? (
                 <>
@@ -218,12 +261,19 @@ function App() {
                     portfolioId={catPortfolio.id}
                     portfolioName={catPortfolio.name}
                     nProperties={catPortfolio.count}
-                    onPropertyClick={(id) => { setCatLocationId(id); setCatStep('location'); }}
+                    selectedPropertyId={selectedCatPropertyId}
+                    selectedIds={selectedCatIds}
+                    onPropertyClick={(id) => {
+                      selectCatProperty(id);
+                      setCatLocationId(id);
+                      setCatStep('location');
+                    }}
                     onModelComplete={handleModelComplete}
+                    onSessionCreated={(sid) => setCatActiveSessionId(sid)}
                   />
                   <div className="cat-nav-buttons">
                     <button className="btn btn-outline btn-sm" onClick={() => setCatStep('history')}>Session History</button>
-                    <button className="btn btn-outline btn-sm" onClick={() => { setCatPortfolio(null); setCatPropertiesGeoJSON(null); setAalHeatmapGeoJSON(null); setCatStep('browse'); }}>New Portfolio</button>
+                    <button className="btn btn-outline btn-sm" onClick={() => { setCatPortfolio(null); setCatPropertiesGeoJSON(null); setAalHeatmapGeoJSON(null); setCatActiveSessionId(null); setCatStep('browse'); }}>New Portfolio</button>
                   </div>
                 </>
               ) : catStep === 'seed' ? (
@@ -237,7 +287,12 @@ function App() {
                     bbox={catBbox}
                     onClearBbox={() => setCatBbox(null)}
                     onPortfolioCreated={handlePortfolioCreated}
-                    onPropertyClick={(id) => { setCatLocationId(id); setCatStep('location'); }}
+                    selectedPropertyId={selectedCatPropertyId}
+                    onPropertyClick={(id) => {
+                      selectCatProperty(id);
+                      setCatLocationId(id);
+                      setCatStep('location');
+                    }}
                   />
                   <div className="cat-nav-buttons">
                     <button className="btn btn-outline btn-sm" onClick={() => setCatStep('seed')}>Re-seed Properties</button>
