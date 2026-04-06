@@ -10,3 +10,4 @@ dist/
 .vite/
 georisk/backend/data/catalog/*.geojson
 georisk/backend/data/catalog/*.parquet
+.pytest_cache/
