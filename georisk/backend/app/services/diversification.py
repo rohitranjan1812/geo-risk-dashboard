@@ -40,11 +40,12 @@ def compute_diversification(
 
     n = len(standalone_pmls)
     corr_factor = 0.3
+    cross_terms = sum(
+        standalone_pmls_arr[i] * standalone_pmls_arr[j]
+        for i in range(n) for j in range(i + 1, n)
+    )
     portfolio_pml = float(np.sqrt(np.sum(standalone_pmls_arr ** 2) +
-                                   2 * corr_factor * np.sum(
-                                       standalone_pmls_arr[i] * standalone_pmls_arr[j]
-                                       for i in range(n) for j in range(i + 1, n)
-                                   )))
+                                   2 * corr_factor * cross_terms))
 
     diversification_benefit = max(0, sum_standalone - portfolio_pml)
     diversification_pct = diversification_benefit / sum_standalone * 100 if sum_standalone > 0 else 0
@@ -53,12 +54,13 @@ def compute_diversification(
     for i, (pid, sa_pml, aal) in enumerate(zip(property_ids, standalone_pmls, aals)):
         remaining = np.delete(standalone_pmls_arr, i)
         if len(remaining) > 0:
+            cross_rem = sum(
+                remaining[ii] * remaining[jj]
+                for ii in range(len(remaining))
+                for jj in range(ii + 1, len(remaining))
+            )
             portfolio_without = float(np.sqrt(np.sum(remaining ** 2) +
-                                              2 * corr_factor * np.sum(
-                                                  remaining[ii] * remaining[jj]
-                                                  for ii in range(len(remaining))
-                                                  for jj in range(ii + 1, len(remaining))
-                                              )))
+                                               2 * corr_factor * cross_rem))
         else:
             portfolio_without = 0.0
 
