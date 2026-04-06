@@ -18,6 +18,8 @@ class Settings(BaseSettings):
 
     USGS_EARTHQUAKE_API: str = "https://earthquake.usgs.gov/fdsnws/event/1/query"
     USGS_DESIGNMAPS_API: str = "https://earthquake.usgs.gov/ws/designmaps/"
+    USGS_UNIFORM_HAZARD_REFERENCE_DOCUMENT: str = "ASCE41-13"
+    USGS_UNIFORM_HAZARD_SITE_CLASS: str = "BC"
     FEMA_NFHL_API: str = "https://hazards.fema.gov/arcgis/rest/services/public/NFHL/MapServer"
     FEMA_CLAIMS_API: str = "https://www.fema.gov/api/open/v2/FimaNfipClaims"
     NHC_BESTTRACK_URL: str = "https://www.nhc.noaa.gov/data/hurdat/hurdat2-1851-2023-051124.txt"
@@ -26,6 +28,8 @@ class Settings(BaseSettings):
     SCRAPE_INTERVAL_EARTHQUAKE_HOURS: int = 1
     SCRAPE_INTERVAL_FLOOD_HOURS: int = 24
     SCRAPE_INTERVAL_HURRICANE_HOURS: int = 6
+
+    SYNTHETIC_PROPERTIES_COUNT: int = 0
 
     CORS_ORIGINS: list[str] = ["http://localhost:5173", "http://localhost:3000"]
 

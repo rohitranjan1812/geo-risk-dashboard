@@ -1,6 +1,10 @@
 import logging
 from datetime import datetime, timezone
 
+import httpx
+
+from app.config import settings
+from app.models.database import sqlite_session
 from app.models.schemas import RiskScorecard, HazardScore
 from app.scrapers.usgs_seismic import estimate_pga_at_point
 from app.scrapers.fema_flood import determine_flood_zone
@@ -22,9 +26,83 @@ CONSTRUCTION_MODIFIERS = {
     "Unknown": 1.0,
 }
 
+def _fetch_usgs_pgauh(lat: float, lon: float) -> tuple[float | None, str]:
+    """
+    Fetch point PGA (uniform hazard) from USGS DesignMaps web service.
+    Returns (pga, source_string). pga is None on failure.
+    """
+    url = settings.USGS_DESIGNMAPS_API.rstrip("/") + "/uniform-hazard.json"
+    params = {
+        "latitude": lat,
+        "longitude": lon,
+        "referenceDocument": settings.USGS_UNIFORM_HAZARD_REFERENCE_DOCUMENT,
+        "siteClass": settings.USGS_UNIFORM_HAZARD_SITE_CLASS,
+    }
+    try:
+        resp = httpx.get(url, params=params, timeout=5.0, follow_redirects=True)
+        resp.raise_for_status()
+        payload = resp.json()
+        pga = payload.get("response", {}).get("data", {}).get("pgauh")
+        if isinstance(pga, (int, float)):
+            return float(pga), f"USGS DesignMaps ({settings.USGS_UNIFORM_HAZARD_REFERENCE_DOCUMENT})"
+    except Exception as e:
+        logger.debug(f"USGS pgauh fetch failed: {e}")
+    return None, "USGS simplified zones"
+
 
 def compute_seismic_score(lat: float, lon: float, construction: str = "Unknown") -> HazardScore:
-    pga = estimate_pga_at_point(lat, lon)
+    pga = None
+    source = "USGS simplified zones"
+
+    # Cache per (lat,lon) rounded to 4 decimals to avoid repeated network calls.
+    lat_key = round(lat, 4)
+    lon_key = round(lon, 4)
+    cache_key = f"{lat_key},{lon_key}"
+
+    with sqlite_session() as conn:
+        row = conn.execute(
+            """
+            SELECT raw_data, source
+            FROM hazard_data
+            WHERE property_id IS NULL AND peril = 'seismic_pga' AND raw_data LIKE ?
+            ORDER BY queried_at DESC
+            LIMIT 1
+            """,
+            (f"%\"key\": \"{cache_key}\"%",),
+        ).fetchone()
+        if row:
+            try:
+                raw = row["raw_data"]
+                data = httpx.Response(200, content=raw.encode("utf-8")).json()
+                cached = data.get("pga")
+                if isinstance(cached, (int, float)):
+                    pga = float(cached)
+                    source = row["source"] or source
+            except Exception:
+                pass
+
+    if pga is None:
+        fetched, fetched_source = _fetch_usgs_pgauh(lat, lon)
+        if fetched is not None:
+            pga = fetched
+            source = fetched_source
+            with sqlite_session() as conn:
+                conn.execute(
+                    """
+                    INSERT INTO hazard_data (property_id, peril, score, raw_data, source)
+                    VALUES (NULL, 'seismic_pga', NULL, ?, ?)
+                    """,
+                    (
+                        httpx.Response(
+                            200,
+                            json={"key": cache_key, "latitude": lat, "longitude": lon, "pga": pga},
+                        ).text,
+                        source,
+                    ),
+                )
+
+    if pga is None:
+        pga = estimate_pga_at_point(lat, lon)
 
     base_score = min(100, pga * 140)
 
@@ -47,7 +125,7 @@ def compute_seismic_score(lat: float, lon: float, construction: str = "Unknown")
         score=round(adjusted, 1),
         raw_value=pga,
         unit="g (PGA)",
-        source="USGS NSHM",
+        source=source,
         description=desc,
     )
 

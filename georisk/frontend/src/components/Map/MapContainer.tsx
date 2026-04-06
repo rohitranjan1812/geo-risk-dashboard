@@ -19,6 +19,8 @@ interface MapContainerProps {
   highlightCoords?: [number, number] | null;
   portfolioGeoJSON?: GeoJSON.FeatureCollection | null;
   isDark: boolean;
+  enableBboxSelect?: boolean;
+  onBboxSelect?: (bbox: [number, number, number, number]) => void;
 }
 
 export function MapContainer({
@@ -28,6 +30,8 @@ export function MapContainer({
   highlightCoords,
   portfolioGeoJSON,
   isDark,
+  enableBboxSelect,
+  onBboxSelect,
 }: MapContainerProps) {
   const mapContainer = useRef<HTMLDivElement>(null);
   const map = useRef<maplibregl.Map | null>(null);
@@ -283,6 +287,60 @@ export function MapContainer({
 
     return () => { marker.remove(); };
   }, [highlightCoords]);
+
+  useEffect(() => {
+    const m = map.current;
+    if (!m || !enableBboxSelect) return;
+
+    let start: maplibregl.LngLat | null = null;
+    let box: HTMLDivElement | null = null;
+
+    const onMouseDown = (e: maplibregl.MapMouseEvent & { originalEvent: MouseEvent }) => {
+      if (!e.originalEvent.shiftKey) return;
+      e.originalEvent.preventDefault();
+      m.dragPan.disable();
+      start = e.lngLat;
+      box = document.createElement('div');
+      box.className = 'bbox-selection-box';
+      box.style.position = 'absolute';
+      m.getContainer().appendChild(box);
+
+      const onMouseMove = (ev: maplibregl.MapMouseEvent & { originalEvent: MouseEvent }) => {
+        if (!start || !box) return;
+        const startPt = m.project(start);
+        const curPt = m.project(ev.lngLat);
+        const left = Math.min(startPt.x, curPt.x);
+        const top = Math.min(startPt.y, curPt.y);
+        box.style.left = left + 'px';
+        box.style.top = top + 'px';
+        box.style.width = Math.abs(curPt.x - startPt.x) + 'px';
+        box.style.height = Math.abs(curPt.y - startPt.y) + 'px';
+      };
+
+      const onMouseUp = (ev: maplibregl.MapMouseEvent) => {
+        m.dragPan.enable();
+        if (start && onBboxSelect) {
+          const west = Math.min(start.lng, ev.lngLat.lng);
+          const south = Math.min(start.lat, ev.lngLat.lat);
+          const east = Math.max(start.lng, ev.lngLat.lng);
+          const north = Math.max(start.lat, ev.lngLat.lat);
+          if (Math.abs(east - west) > 0.01 && Math.abs(north - south) > 0.01) {
+            onBboxSelect([west, south, east, north]);
+          }
+        }
+        if (box) { box.remove(); box = null; }
+        start = null;
+        m.off('mousemove', onMouseMove as any);
+        m.off('mouseup', onMouseUp as any);
+      };
+
+      m.on('mousemove', onMouseMove as any);
+      m.on('mouseup', onMouseUp as any);
+    };
+
+    m.on('mousedown', onMouseDown as any);
+    return () => { m.off('mousedown', onMouseDown as any); };
+  }, [enableBboxSelect, onBboxSelect, mapLoaded]);
 
   return <div ref={mapContainer} className="map-container" />;
 }

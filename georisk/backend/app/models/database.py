@@ -127,6 +127,18 @@ def init_database():
 
     duck = get_duckdb_conn()
     duck.execute("""
+        CREATE TABLE IF NOT EXISTS synthetic_properties (
+            property_id BIGINT,
+            latitude DOUBLE,
+            longitude DOUBLE,
+            tiv DOUBLE,
+            construction_type TEXT,
+            occupancy TEXT,
+            year_built INTEGER,
+            stories INTEGER
+        )
+    """)
+    duck.execute("""
         CREATE TABLE IF NOT EXISTS risk_scores (
             property_id INTEGER,
             peril TEXT,
@@ -154,4 +166,70 @@ def init_database():
             scored_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     """)
+
+    duck.execute("""
+        CREATE TABLE IF NOT EXISTS cat_portfolios (
+            portfolio_id TEXT,
+            name TEXT,
+            filter_criteria TEXT,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+    duck.execute("""
+        CREATE TABLE IF NOT EXISTS cat_portfolio_members (
+            portfolio_id TEXT,
+            property_id BIGINT
+        )
+    """)
+    duck.execute("""
+        CREATE TABLE IF NOT EXISTS cat_results (
+            portfolio_id TEXT,
+            property_id BIGINT,
+            peril TEXT,
+            model_id TEXT,
+            aal DOUBLE,
+            oep_100 DOUBLE,
+            oep_250 DOUBLE,
+            oep_500 DOUBLE,
+            technical_rate DOUBLE,
+            loaded_rate DOUBLE,
+            marginal_pml DOUBLE,
+            scored_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+
+    target = int(getattr(settings, "SYNTHETIC_PROPERTIES_COUNT", 0) or 0)
+    if target > 0:
+        existing = duck.execute("SELECT COUNT(*) FROM synthetic_properties").fetchone()[0]
+        if existing < target:
+            duck.execute("DELETE FROM synthetic_properties")
+            duck.execute(
+                """
+                INSERT INTO synthetic_properties
+                SELECT
+                    i AS property_id,
+                    (24.0 + random() * 25.0) AS latitude,
+                    (-125.0 + random() * 59.0) AS longitude,
+                    exp(random() * 3.0 + 12.0) AS tiv,
+                    CASE floor(random() * 5)
+                        WHEN 0 THEN 'Wood Frame'
+                        WHEN 1 THEN 'Masonry'
+                        WHEN 2 THEN 'Reinforced Concrete'
+                        WHEN 3 THEN 'Steel Frame'
+                        ELSE 'Concrete Tilt-Up'
+                    END AS construction_type,
+                    CASE floor(random() * 5)
+                        WHEN 0 THEN 'Residential'
+                        WHEN 1 THEN 'Commercial'
+                        WHEN 2 THEN 'Industrial'
+                        WHEN 3 THEN 'Hospitality'
+                        ELSE 'Healthcare'
+                    END AS occupancy,
+                    CAST(1950 + floor(random() * 75) AS INTEGER) AS year_built,
+                    CAST(1 + floor(random() * 30) AS INTEGER) AS stories
+                FROM range(1, ? + 1) t(i)
+                """,
+                [target],
+            )
+
     duck.close()

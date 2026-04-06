@@ -81,3 +81,13 @@ export async function fetchPortfolioAccumulation(portfolioId: string): Promise<G
 export function getPortfolioExportUrl(portfolioId: string): string {
   return `http://localhost:8000/api/portfolio/${portfolioId}/export`;
 }
+
+export async function fetchSyntheticSummary(sampleN = 20000): Promise<any> {
+  const { data } = await api.get(`/synthetic/summary?sample_n=${sampleN}`);
+  return data;
+}
+
+export async function fetchSyntheticAccumulationHex(resolution = 5, sampleN = 200000, topK = 200): Promise<GeoJSON.FeatureCollection> {
+  const { data } = await api.get(`/synthetic/accumulation-hex?resolution=${resolution}&sample_n=${sampleN}&top_k=${topK}`);
+  return data;
+}
