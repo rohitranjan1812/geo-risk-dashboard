@@ -2,6 +2,7 @@
 import os
 import json
 import pytest
+from pydantic import ValidationError
 
 
 class TestPathTraversal:
@@ -174,23 +175,23 @@ class TestFilterRequestValidation:
     def test_rejects_zero_page(self):
         from app.api.routes_synthetic import FilterRequest
 
-        with pytest.raises(Exception):
+        with pytest.raises(ValidationError):
             FilterRequest(page=0)
 
     def test_rejects_negative_page(self):
         from app.api.routes_synthetic import FilterRequest
 
-        with pytest.raises(Exception):
+        with pytest.raises(ValidationError):
             FilterRequest(page=-1)
 
     def test_rejects_oversized_page_size(self):
         from app.api.routes_synthetic import FilterRequest
 
-        with pytest.raises(Exception):
+        with pytest.raises(ValidationError):
             FilterRequest(page_size=5000)
 
     def test_rejects_zero_page_size(self):
         from app.api.routes_synthetic import FilterRequest
 
-        with pytest.raises(Exception):
+        with pytest.raises(ValidationError):
             FilterRequest(page_size=0)
