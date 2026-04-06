@@ -1,8 +1,9 @@
-import { Eye, EyeOff, Mountain, Droplets, Wind, MapPin, Activity } from 'lucide-react';
+import { Eye, EyeOff, Mountain, Droplets, Wind, MapPin, Activity, Layers, Flame } from 'lucide-react';
 
 interface LayerControlProps {
   visibility: Record<string, boolean>;
   onToggle: (layerId: string) => void;
+  showCatLayers?: boolean;
 }
 
 const LAYER_CONFIG = [
@@ -13,11 +14,19 @@ const LAYER_CONFIG = [
   { id: 'earthquakes', label: 'Recent Earthquakes', icon: Activity, color: '#ffd54f' },
 ];
 
-export function HazardLayerControls({ visibility, onToggle }: LayerControlProps) {
+const CAT_LAYER_CONFIG = [
+  { id: 'cat_properties', label: 'CAT Properties', icon: Layers, color: '#7c4dff' },
+  { id: 'aal_heatmap', label: 'AAL Heatmap', icon: Flame, color: '#ff5722' },
+  { id: 'portfolio_heat', label: 'Portfolio Heat', icon: Flame, color: '#e91e63' },
+];
+
+export function HazardLayerControls({ visibility, onToggle, showCatLayers }: LayerControlProps) {
+  const allLayers = showCatLayers ? [...LAYER_CONFIG, ...CAT_LAYER_CONFIG] : LAYER_CONFIG;
+
   return (
     <div className="layer-controls">
       <h3>Map Layers</h3>
-      {LAYER_CONFIG.map(({ id, label, icon: Icon, color }) => (
+      {allLayers.map(({ id, label, icon: Icon, color }) => (
         <button
           key={id}
           className={`layer-toggle ${visibility[id] ? 'active' : ''}`}

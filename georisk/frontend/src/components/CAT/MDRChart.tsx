@@ -29,7 +29,7 @@ export function MDRChart({ curve, operatingPoint, peril, intensityUnit }: MDRCha
           <YAxis domain={[0, 1]} stroke="#aaa" tick={{ fontSize: 10 }}
             label={{ value: 'MDR', angle: -90, position: 'insideLeft', fontSize: 10, fill: '#888' }} />
           <Tooltip contentStyle={{ background: '#1a1a2e', border: '1px solid #333', fontSize: 11 }}
-            formatter={(v: number) => [(v * 100).toFixed(1) + '%']} />
+            formatter={(v: any) => [`${(Number(v || 0) * 100).toFixed(1)}%`, 'MDR']} />
           <Area type="monotone" dataKey="upper" stroke="none" fill={color} fillOpacity={0.1} />
           <Area type="monotone" dataKey="lower" stroke="none" fill={color} fillOpacity={0.1} />
           <Area type="monotone" dataKey="mean_dr" stroke={color} fill={color} fillOpacity={0.25} strokeWidth={2} />

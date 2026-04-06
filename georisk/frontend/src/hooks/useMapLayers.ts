@@ -10,11 +10,15 @@ interface LayerState {
 }
 
 interface LayerVisibility {
+  [key: string]: boolean;
   earthquakes: boolean;
   seismic_zones: boolean;
   flood_zones: boolean;
   hurricane_tracks: boolean;
   properties: boolean;
+  cat_properties: boolean;
+  aal_heatmap: boolean;
+  portfolio_heat: boolean;
 }
 
 export function useMapLayers() {
@@ -32,6 +36,9 @@ export function useMapLayers() {
     flood_zones: true,
     hurricane_tracks: true,
     properties: true,
+    cat_properties: true,
+    aal_heatmap: true,
+    portfolio_heat: true,
   });
 
   const [loading, setLoading] = useState(true);
@@ -66,7 +73,7 @@ export function useMapLayers() {
     loadLayers();
   }, [loadLayers]);
 
-  const toggleLayer = useCallback((layerId: keyof LayerVisibility) => {
+  const toggleLayer = useCallback((layerId: string) => {
     setVisibility(prev => ({ ...prev, [layerId]: !prev[layerId] }));
   }, []);
 

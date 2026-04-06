@@ -320,3 +320,148 @@ async def list_portfolios():
     duck.close()
     return [{"portfolio_id": r[0], "name": r[1], "created_at": str(r[2]) if r[2] else None, "n_properties": int(r[3])} for r in rows]
 
+
+class SeedRequest(BaseModel):
+    count: int = 100000
+    bbox: list[float] | None = None
+    tiv_min: float = 50000
+    tiv_max: float = 20000000
+    construction_types: list[str] | None = None
+    occupancies: list[str] | None = None
+
+
+@router.post("/seed")
+async def seed_synthetic(req: SeedRequest):
+    import time
+    t0 = time.time()
+    duck = get_duckdb_conn()
+    duck.execute("DELETE FROM synthetic_properties")
+
+    lat_min, lat_max = 24.0, 49.0
+    lon_min, lon_max = -125.0, -66.0
+    if req.bbox and len(req.bbox) == 4:
+        lon_min, lat_min, lon_max, lat_max = req.bbox
+
+    ct_list = req.construction_types or ["Wood Frame", "Masonry", "Reinforced Concrete", "Steel Frame", "Concrete Tilt-Up"]
+    occ_list = req.occupancies or ["Residential", "Commercial", "Industrial", "Hospitality", "Healthcare"]
+    ct_cases = " ".join([f"WHEN {i} THEN '{c}'" for i, c in enumerate(ct_list)])
+    occ_cases = " ".join([f"WHEN {i} THEN '{o}'" for i, o in enumerate(occ_list)])
+    n_ct = len(ct_list)
+    n_occ = len(occ_list)
+
+    tiv_log_min = f"ln({max(req.tiv_min, 1)})"
+    tiv_log_max = f"ln({max(req.tiv_max, 2)})"
+
+    duck.execute(f"""
+        INSERT INTO synthetic_properties
+        SELECT
+            i AS property_id,
+            ({lat_min} + random() * {lat_max - lat_min}) AS latitude,
+            ({lon_min} + random() * {lon_max - lon_min}) AS longitude,
+            exp({tiv_log_min} + random() * ({tiv_log_max} - {tiv_log_min})) AS tiv,
+            CASE CAST(floor(random() * {n_ct}) AS INTEGER) {ct_cases} END AS construction_type,
+            CASE CAST(floor(random() * {n_occ}) AS INTEGER) {occ_cases} END AS occupancy,
+            CAST(1950 + floor(random() * 75) AS INTEGER) AS year_built,
+            CAST(1 + floor(random() * 30) AS INTEGER) AS stories
+        FROM range(1, {int(req.count)} + 1) t(i)
+    """)
+    actual = duck.execute("SELECT COUNT(*) FROM synthetic_properties").fetchone()[0]
+    duck.close()
+    elapsed = round(time.time() - t0, 2)
+    return {"count": int(actual), "elapsed_seconds": elapsed}
+
+
+@router.get("/stats")
+async def synthetic_stats():
+    duck = get_duckdb_conn()
+    row = duck.execute("""
+        SELECT COUNT(*) as cnt,
+               MIN(tiv) as tiv_min, MAX(tiv) as tiv_max, AVG(tiv) as tiv_avg,
+               MIN(latitude) as lat_min, MAX(latitude) as lat_max,
+               MIN(longitude) as lon_min, MAX(longitude) as lon_max
+        FROM synthetic_properties
+    """).fetchone()
+    duck.close()
+    if not row or row[0] == 0:
+        return {"count": 0}
+    return {
+        "count": int(row[0]),
+        "tiv_min": round(float(row[1]), 2), "tiv_max": round(float(row[2]), 2), "tiv_avg": round(float(row[3]), 2),
+        "lat_min": round(float(row[4]), 4), "lat_max": round(float(row[5]), 4),
+        "lon_min": round(float(row[6]), 4), "lon_max": round(float(row[7]), 4),
+    }
+
+
+@router.get("/portfolio/{portfolio_id}/geojson")
+async def portfolio_geojson(portfolio_id: str, limit: int = Query(5000, ge=100, le=50000)):
+    duck = get_duckdb_conn()
+    rows = duck.execute(
+        f"""SELECT p.property_id, p.latitude, p.longitude, p.tiv,
+                   p.construction_type, p.occupancy, p.year_built, p.stories
+            FROM cat_portfolio_members m
+            JOIN synthetic_properties p ON m.property_id = p.property_id
+            WHERE m.portfolio_id = ?
+            ORDER BY p.tiv DESC LIMIT {limit}""",
+        [portfolio_id],
+    ).fetchall()
+    duck.close()
+    features = []
+    for r in rows:
+        features.append({
+            "type": "Feature",
+            "properties": {
+                "id": int(r[0]), "tiv": float(r[3]),
+                "construction_type": str(r[4]), "occupancy": str(r[5]),
+                "year_built": int(r[6]), "stories": int(r[7]),
+                "composite_score": 0, "seismic_score": 0, "flood_score": 0, "wind_score": 0,
+                "aal": 0, "technical_rate": 0, "dominant_peril": "unknown",
+            },
+            "geometry": {"type": "Point", "coordinates": [float(r[2]), float(r[1])]},
+        })
+    return {"type": "FeatureCollection", "features": features}
+
+
+@router.get("/portfolio/{portfolio_id}/scored-geojson")
+async def portfolio_scored_geojson(portfolio_id: str, limit: int = Query(5000, ge=100, le=50000)):
+    duck = get_duckdb_conn()
+    rows = duck.execute(
+        f"""SELECT p.property_id, p.latitude, p.longitude, p.tiv,
+                   p.construction_type, p.occupancy,
+                   COALESCE(SUM(CASE WHEN cr.peril='seismic' THEN cr.aal END), 0) as s_aal,
+                   COALESCE(SUM(CASE WHEN cr.peril='flood' THEN cr.aal END), 0) as f_aal,
+                   COALESCE(SUM(CASE WHEN cr.peril='wind' THEN cr.aal END), 0) as w_aal,
+                   COALESCE(SUM(cr.aal), 0) as total_aal
+            FROM cat_portfolio_members m
+            JOIN synthetic_properties p ON m.property_id = p.property_id
+            LEFT JOIN cat_results cr ON cr.property_id = p.property_id AND cr.portfolio_id = m.portfolio_id
+            WHERE m.portfolio_id = ?
+            GROUP BY p.property_id, p.latitude, p.longitude, p.tiv, p.construction_type, p.occupancy
+            ORDER BY total_aal DESC LIMIT {limit}""",
+        [portfolio_id],
+    ).fetchall()
+    duck.close()
+    features = []
+    for r in rows:
+        tiv = float(r[3])
+        s_aal, f_aal, w_aal, total_aal = float(r[6]), float(r[7]), float(r[8]), float(r[9])
+        tech_rate = total_aal / tiv * 100 if tiv > 0 else 0
+        s_score = min(100, s_aal / tiv * 10000) if tiv > 0 else 0
+        f_score = min(100, f_aal / tiv * 10000) if tiv > 0 else 0
+        w_score = min(100, w_aal / tiv * 10000) if tiv > 0 else 0
+        composite = s_score * 0.35 + f_score * 0.35 + w_score * 0.30
+        perils = {"seismic": s_aal, "flood": f_aal, "wind": w_aal}
+        dominant = max(perils, key=perils.get) if total_aal > 0 else "unknown"
+        features.append({
+            "type": "Feature",
+            "properties": {
+                "id": int(r[0]), "tiv": tiv,
+                "construction_type": str(r[4]), "occupancy": str(r[5]),
+                "composite_score": round(composite, 1),
+                "seismic_score": round(s_score, 1), "flood_score": round(f_score, 1), "wind_score": round(w_score, 1),
+                "aal": round(total_aal, 2), "technical_rate": round(tech_rate, 4),
+                "dominant_peril": dominant,
+            },
+            "geometry": {"type": "Point", "coordinates": [float(r[2]), float(r[1])]},
+        })
+    return {"type": "FeatureCollection", "features": features}
+

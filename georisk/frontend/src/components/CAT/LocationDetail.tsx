@@ -1,12 +1,14 @@
-import { useState, useEffect } from 'react';
-import { X, MapPin, Mountain, Droplets, Wind, Shield, DollarSign, TrendingUp } from 'lucide-react';
+import { useState, useEffect, useMemo } from 'react';
+import { X, MapPin, Mountain, Droplets, Wind, Shield, TrendingUp } from 'lucide-react';
 import { LoadingSpinner } from '../common/LoadingSpinner';
 import { MDRChart } from './MDRChart';
 import { EPCurveChart } from './EPCurveChart';
 import axios from 'axios';
+import { fetchCatEventSets, fetchCatEventSet } from '../../api/client';
 
 interface LocationDetailProps {
   propertyId: number;
+  sessionId?: string | null;
   onClose: () => void;
 }
 
@@ -14,9 +16,13 @@ const TIER_COLORS: Record<string, string> = {
   Low: '#4caf50', Moderate: '#ff9800', High: '#f44336', 'Very High': '#d32f2f', Extreme: '#880e4f',
 };
 
-export function LocationDetail({ propertyId, onClose }: LocationDetailProps) {
+export function LocationDetail({ propertyId, sessionId, onClose }: LocationDetailProps) {
   const [data, setData] = useState<any>(null);
   const [loading, setLoading] = useState(true);
+  const [eventSets, setEventSets] = useState<any[]>([]);
+  const [eventSetLoading, setEventSetLoading] = useState(false);
+  const [selectedEventSetId, setSelectedEventSetId] = useState<string | null>(null);
+  const [selectedEventSet, setSelectedEventSet] = useState<any>(null);
 
   useEffect(() => {
     setLoading(true);
@@ -26,12 +32,47 @@ export function LocationDetail({ propertyId, onClose }: LocationDetailProps) {
       .finally(() => setLoading(false));
   }, [propertyId]);
 
+  // Event sets (requires sessionId context)
+  useEffect(() => {
+    setEventSets([]);
+    setSelectedEventSetId(null);
+    setSelectedEventSet(null);
+  }, [propertyId]);
+
+  useEffect(() => {
+    // sessionId is optional; without it we cannot scope event sets.
+    if (!sessionId) return;
+    setEventSetLoading(true);
+    fetchCatEventSets(String(sessionId), propertyId)
+      .then((rows) => setEventSets(rows || []))
+      .catch((e) => console.error(e))
+      .finally(() => setEventSetLoading(false));
+  }, [propertyId, sessionId]);
+
+  useEffect(() => {
+    if (!selectedEventSetId) return;
+    setSelectedEventSet(null);
+    fetchCatEventSet(selectedEventSetId)
+      .then((d) => setSelectedEventSet(d))
+      .catch((e) => console.error(e));
+  }, [selectedEventSetId]);
+
   if (loading) return <LoadingSpinner text="Running stochastic model..." />;
   if (!data) return <div className="error-banner">Failed to load location detail</div>;
 
   const { exposure, hazard, vulnerability, loss, ep_curves } = data;
   const totalScore = loss.technical_rate_pct || 0;
   const tier = totalScore < 0.5 ? 'Low' : totalScore < 1.5 ? 'Moderate' : totalScore < 3 ? 'High' : totalScore < 5 ? 'Very High' : 'Extreme';
+
+  const eventSetsByPeril = useMemo(() => {
+    const out: Record<string, any[]> = { seismic: [], flood: [], wind: [] };
+    for (const r of eventSets || []) {
+      const p = r.peril || 'unknown';
+      if (!out[p]) out[p] = [];
+      out[p].push(r);
+    }
+    return out;
+  }, [eventSets]);
 
   return (
     <div className="location-detail">
@@ -130,6 +171,80 @@ export function LocationDetail({ propertyId, onClose }: LocationDetailProps) {
             <div><span className="hve-label">PML-500</span><span className="hve-value">${loss.pml?.['500']?.toLocaleString()}</span></div>
           </div>
           {ep_curves?.all_perils && <EPCurveChart oep={ep_curves.all_perils.oep} peril="all_perils" height={180} />}
+        </div>
+
+        <div className="hve-card">
+          <h3><TrendingUp size={16} /> Event Sets Used</h3>
+          {!sessionId ? (
+            <div className="text-muted" style={{ fontSize: 12 }}>
+              Run or load a CAT session to view persisted event sets for this location.
+            </div>
+          ) : eventSetLoading ? (
+            <LoadingSpinner text="Loading event sets..." />
+          ) : (
+            <>
+              <div className="hve-sub">
+                <h4>Choose peril/model</h4>
+                <div className="filter-grid" style={{ marginBottom: 8 }}>
+                  {(['seismic', 'flood', 'wind'] as const).map(p => (
+                    <div key={p} className="filter-row" style={{ alignItems: 'center' }}>
+                      <label style={{ minWidth: 60 }}>{p}</label>
+                      <select
+                        value={eventSetsByPeril[p]?.some((x: any) => x.event_set_id === selectedEventSetId) ? selectedEventSetId || '' : ''}
+                        onChange={(e) => setSelectedEventSetId(e.target.value || null)}
+                        style={{ width: '100%' }}
+                      >
+                        <option value="">Select model...</option>
+                        {(eventSetsByPeril[p] || []).map((r: any) => (
+                          <option key={r.event_set_id} value={r.event_set_id}>
+                            {r.model_id} ({r.n_years}y)
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+                  ))}
+                </div>
+              </div>
+
+              {selectedEventSet && (
+                <div className="hve-sub">
+                  <h4>Sampled events (top losses + random)</h4>
+                  <div className="hve-grid" style={{ marginBottom: 8 }}>
+                    <div><span className="hve-label">Peril</span><span className="hve-value">{selectedEventSet.meta?.peril}</span></div>
+                    <div><span className="hve-label">Model</span><span className="hve-value">{selectedEventSet.meta?.model_id}</span></div>
+                    <div><span className="hve-label">Seed</span><span className="hve-value">{selectedEventSet.meta?.seed}</span></div>
+                    <div><span className="hve-label">Annual years stored</span><span className="hve-value">{selectedEventSet.annual_losses?.length || 0}</span></div>
+                    <div><span className="hve-label">Events stored</span><span className="hve-value">{selectedEventSet.events?.length || 0}</span></div>
+                  </div>
+
+                  <div className="table-scroll" style={{ maxHeight: 260 }}>
+                    <table className="portfolio-table">
+                      <thead>
+                        <tr>
+                          <th>Year</th>
+                          <th>Event</th>
+                          <th>Intensity</th>
+                          <th>DR</th>
+                          <th>Loss</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {(selectedEventSet.events || []).slice(0, 200).map((r: any, i: number) => (
+                          <tr key={i}>
+                            <td>{r.year}</td>
+                            <td>{r.event_index}</td>
+                            <td>{r.intensity?.toFixed?.(3)} {r.intensity_unit}</td>
+                            <td>{(r.dr * 100).toFixed(2)}%</td>
+                            <td>${Number(r.loss || 0).toLocaleString()}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              )}
+            </>
+          )}
         </div>
       </div>
     </div>

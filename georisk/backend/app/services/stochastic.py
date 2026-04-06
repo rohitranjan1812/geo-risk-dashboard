@@ -14,6 +14,8 @@ logger = logging.getLogger(__name__)
 
 RETURN_PERIODS = [10, 25, 50, 100, 250, 500, 1000]
 
+INTENSITY_UNITS = {"seismic": "g", "flood": "ft", "wind": "mph"}
+
 MODEL_PARAMS = {
     "seismic": {
         "conservative": {"freq_mult": 1.3, "intensity_mult": 1.2, "label": "Conservative"},
@@ -54,6 +56,49 @@ class EventTableResult:
     annual_losses: np.ndarray = field(repr=False, default_factory=lambda: np.array([]))
     oep: dict = field(default_factory=dict)
     aep: dict = field(default_factory=dict)
+    params_used: dict = field(default_factory=dict)
+    intensity_unit: str = ""
+    event_sample: list[dict] = field(default_factory=list)
+
+
+class _EventSampler:
+    def __init__(self, rng: np.random.Generator, top_k: int = 200, random_k: int = 200):
+        self._rng = rng
+        self._top_k = int(max(0, top_k))
+        self._random_k = int(max(0, random_k))
+        self._top: list[tuple[float, dict]] = []
+        self._random: list[dict] = []
+        self._seen = 0
+
+    def consider(self, loss: float, record: dict) -> None:
+        self._seen += 1
+
+        if self._top_k > 0:
+            if len(self._top) < self._top_k:
+                self._top.append((loss, record))
+            else:
+                min_i = 0
+                min_loss = self._top[0][0]
+                for i in range(1, len(self._top)):
+                    if self._top[i][0] < min_loss:
+                        min_loss = self._top[i][0]
+                        min_i = i
+                if loss > min_loss:
+                    self._top[min_i] = (loss, record)
+
+        if self._random_k > 0:
+            if len(self._random) < self._random_k:
+                self._random.append(record)
+            else:
+                j = int(self._rng.integers(0, self._seen))
+                if j < self._random_k:
+                    self._random[j] = record
+
+    def sampled(self) -> list[dict]:
+        top_sorted = [r for _, r in sorted(self._top, key=lambda t: t[0], reverse=True)]
+        top_keys = {(r.get("year"), r.get("event_index")) for r in top_sorted}
+        random_unique = [r for r in self._random if (r.get("year"), r.get("event_index")) not in top_keys]
+        return top_sorted + random_unique
 
 
 def _base_hazard_for_location(lat: float, lon: float, pga: float,
@@ -99,72 +144,153 @@ def _base_hazard_for_location(lat: float, lon: float, pga: float,
 
 def _generate_seismic_events(hazard: LocationHazard, model_params: dict,
                               tiv: float, construction: str,
-                              n_years: int, rng: np.random.Generator) -> EventTableResult:
+                              n_years: int, rng: np.random.Generator,
+                              collect_events: bool = False,
+                              sampler: _EventSampler | None = None) -> EventTableResult:
     freq = hazard.base_seismic_freq * model_params["freq_mult"]
     base_pga = hazard.base_seismic_pga * model_params["intensity_mult"]
     annual_losses = np.zeros(n_years)
+    ln_sigma = 0.6
 
     for yr in range(n_years):
         n_events = rng.poisson(freq)
-        yr_max_loss = 0.0
         yr_total_loss = 0.0
-        for _ in range(n_events):
-            pga = float(rng.lognormal(np.log(base_pga), 0.6))
+        for ei in range(int(n_events)):
+            pga = float(rng.lognormal(np.log(base_pga), ln_sigma))
             dmg = seismic_mdr(pga, construction)
             dr = float(rng.normal(dmg.mean_dr, dmg.sigma_dr))
             dr = max(0.0, min(1.0, dr))
             loss = dr * tiv
-            yr_max_loss = max(yr_max_loss, loss)
             yr_total_loss += loss
+            if collect_events and sampler is not None:
+                sampler.consider(loss, {
+                    "year": int(yr + 1),
+                    "event_index": int(ei + 1),
+                    "intensity": float(pga),
+                    "mean_dr": float(dmg.mean_dr),
+                    "dr": float(dr),
+                    "loss": float(loss),
+                })
         annual_losses[yr] = yr_total_loss
 
-    return _build_result("seismic", model_params.get("_id", ""), n_years, annual_losses)
+    return _build_result(
+        "seismic",
+        model_params.get("_id", ""),
+        n_years,
+        annual_losses,
+        params_used={
+            "freq": float(freq),
+            "base_pga": float(base_pga),
+            "ln_sigma": float(ln_sigma),
+            "freq_mult": float(model_params["freq_mult"]),
+            "intensity_mult": float(model_params["intensity_mult"]),
+        },
+        intensity_unit=INTENSITY_UNITS["seismic"],
+        event_sample=sampler.sampled() if (collect_events and sampler is not None) else [],
+    )
 
 
 def _generate_flood_events(hazard: LocationHazard, model_params: dict,
                             tiv: float, occupancy: str, stories: int,
-                            n_years: int, rng: np.random.Generator) -> EventTableResult:
+                            n_years: int, rng: np.random.Generator,
+                            collect_events: bool = False,
+                            sampler: _EventSampler | None = None) -> EventTableResult:
     freq = hazard.base_flood_freq * model_params["freq_mult"]
     base_depth = hazard.base_flood_depth * model_params["intensity_mult"]
     annual_losses = np.zeros(n_years)
+    ln_sigma = 0.7
 
     for yr in range(n_years):
         n_events = rng.poisson(freq)
         yr_total = 0.0
-        for _ in range(n_events):
-            depth = float(rng.lognormal(np.log(max(base_depth, 0.1)), 0.7))
+        for ei in range(int(n_events)):
+            depth = float(rng.lognormal(np.log(max(base_depth, 0.1)), ln_sigma))
             dmg = flood_mdr(depth, stories, occupancy)
             dr = float(rng.normal(dmg.mean_dr, dmg.sigma_dr))
             dr = max(0.0, min(1.0, dr))
-            yr_total += dr * tiv
+            loss = dr * tiv
+            yr_total += loss
+            if collect_events and sampler is not None:
+                sampler.consider(loss, {
+                    "year": int(yr + 1),
+                    "event_index": int(ei + 1),
+                    "intensity": float(depth),
+                    "mean_dr": float(dmg.mean_dr),
+                    "dr": float(dr),
+                    "loss": float(loss),
+                })
         annual_losses[yr] = yr_total
 
-    return _build_result("flood", model_params.get("_id", ""), n_years, annual_losses)
+    return _build_result(
+        "flood",
+        model_params.get("_id", ""),
+        n_years,
+        annual_losses,
+        params_used={
+            "freq": float(freq),
+            "base_depth": float(base_depth),
+            "ln_sigma": float(ln_sigma),
+            "freq_mult": float(model_params["freq_mult"]),
+            "intensity_mult": float(model_params["intensity_mult"]),
+        },
+        intensity_unit=INTENSITY_UNITS["flood"],
+        event_sample=sampler.sampled() if (collect_events and sampler is not None) else [],
+    )
 
 
 def _generate_wind_events(hazard: LocationHazard, model_params: dict,
                            tiv: float, construction: str,
-                           n_years: int, rng: np.random.Generator) -> EventTableResult:
+                           n_years: int, rng: np.random.Generator,
+                           collect_events: bool = False,
+                           sampler: _EventSampler | None = None) -> EventTableResult:
     freq = hazard.base_wind_freq * model_params["freq_mult"]
     base_speed = hazard.base_wind_speed * model_params["intensity_mult"]
     annual_losses = np.zeros(n_years)
+    weibull_k = 2.5
 
     for yr in range(n_years):
         n_events = rng.poisson(freq)
         yr_total = 0.0
-        for _ in range(n_events):
-            speed = float(rng.weibull(2.5) * base_speed * 0.7 + 30)
+        for ei in range(int(n_events)):
+            speed = float(rng.weibull(weibull_k) * base_speed * 0.7 + 30)
             dmg = wind_mdr(speed, construction)
             dr = float(rng.normal(dmg.mean_dr, dmg.sigma_dr))
             dr = max(0.0, min(1.0, dr))
-            yr_total += dr * tiv
+            loss = dr * tiv
+            yr_total += loss
+            if collect_events and sampler is not None:
+                sampler.consider(loss, {
+                    "year": int(yr + 1),
+                    "event_index": int(ei + 1),
+                    "intensity": float(speed),
+                    "mean_dr": float(dmg.mean_dr),
+                    "dr": float(dr),
+                    "loss": float(loss),
+                })
         annual_losses[yr] = yr_total
 
-    return _build_result("wind", model_params.get("_id", ""), n_years, annual_losses)
+    return _build_result(
+        "wind",
+        model_params.get("_id", ""),
+        n_years,
+        annual_losses,
+        params_used={
+            "freq": float(freq),
+            "base_speed": float(base_speed),
+            "weibull_k": float(weibull_k),
+            "freq_mult": float(model_params["freq_mult"]),
+            "intensity_mult": float(model_params["intensity_mult"]),
+        },
+        intensity_unit=INTENSITY_UNITS["wind"],
+        event_sample=sampler.sampled() if (collect_events and sampler is not None) else [],
+    )
 
 
 def _build_result(peril: str, model_id: str, n_years: int,
-                  annual_losses: np.ndarray) -> EventTableResult:
+                  annual_losses: np.ndarray,
+                  params_used: dict | None = None,
+                  intensity_unit: str = "",
+                  event_sample: list[dict] | None = None) -> EventTableResult:
     aal = float(np.mean(annual_losses))
     sorted_losses = np.sort(annual_losses)[::-1]
 
@@ -177,7 +303,9 @@ def _build_result(peril: str, model_id: str, n_years: int,
         aep[rp] = float(sorted_losses[idx])
 
     return EventTableResult(peril=peril, model_id=model_id, n_years=n_years,
-                            aal=aal, annual_losses=annual_losses, oep=oep, aep=aep)
+                            aal=aal, annual_losses=annual_losses, oep=oep, aep=aep,
+                            params_used=params_used or {}, intensity_unit=intensity_unit,
+                            event_sample=event_sample or [])
 
 
 def run_stochastic_for_location(
@@ -185,6 +313,9 @@ def run_stochastic_for_location(
     construction: str, occupancy: str, stories: int,
     pga: float, flood_zone: str, wind_prob: float,
     n_years: int = 10000, seed: int | None = None,
+    collect_events: bool = False,
+    top_k_events: int = 200,
+    random_k_events: int = 200,
 ) -> dict:
     rng = np.random.default_rng(seed)
     hazard = _base_hazard_for_location(lat, lon, pga, flood_zone, wind_prob)
@@ -195,18 +326,24 @@ def run_stochastic_for_location(
 
     for model_id, params in MODEL_PARAMS["seismic"].items():
         p = {**params, "_id": model_id}
+        sampler = _EventSampler(rng, top_k=top_k_events, random_k=random_k_events) if collect_events else None
         results_by_peril["seismic"][model_id] = _generate_seismic_events(
-            hazard, p, tiv, construction, n_years, rng)
+            hazard, p, tiv, construction, n_years, rng,
+            collect_events=collect_events, sampler=sampler)
 
     for model_id, params in MODEL_PARAMS["flood"].items():
         p = {**params, "_id": model_id}
+        sampler = _EventSampler(rng, top_k=top_k_events, random_k=random_k_events) if collect_events else None
         results_by_peril["flood"][model_id] = _generate_flood_events(
-            hazard, p, tiv, occupancy, stories, n_years, rng)
+            hazard, p, tiv, occupancy, stories, n_years, rng,
+            collect_events=collect_events, sampler=sampler)
 
     for model_id, params in MODEL_PARAMS["wind"].items():
         p = {**params, "_id": model_id}
+        sampler = _EventSampler(rng, top_k=top_k_events, random_k=random_k_events) if collect_events else None
         results_by_peril["wind"][model_id] = _generate_wind_events(
-            hazard, p, tiv, construction, n_years, rng)
+            hazard, p, tiv, construction, n_years, rng,
+            collect_events=collect_events, sampler=sampler)
 
     return results_by_peril
 

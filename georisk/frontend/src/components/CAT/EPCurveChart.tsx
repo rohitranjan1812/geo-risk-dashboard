@@ -51,7 +51,7 @@ export function EPCurveChart({ oep, aep, models, peril, height = 250 }: EPCurveC
             label={{ value: 'Return Period (yr)', position: 'insideBottom', offset: -2, fontSize: 10, fill: '#888' }} />
           <YAxis stroke="#aaa" tick={{ fontSize: 10 }} tickFormatter={fmt} />
           <Tooltip contentStyle={{ background: '#1a1a2e', border: '1px solid #333', fontSize: 11 }}
-            formatter={(v: number) => [fmt(v)]} labelFormatter={v => `${v}-yr`} />
+            formatter={(v: any) => [fmt(Number(v || 0)), 'Loss']} labelFormatter={(v: any) => `${v}-yr`} />
           <Legend wrapperStyle={{ fontSize: 10 }} />
           <Line type="monotone" dataKey="blended_oep" name="Blended OEP" stroke={blendColor} strokeWidth={3} dot={{ r: 3 }} />
           {aep && <Line type="monotone" dataKey="blended_aep" name="Blended AEP" stroke={blendColor} strokeWidth={2} strokeDasharray="5 5" dot={{ r: 2 }} />}

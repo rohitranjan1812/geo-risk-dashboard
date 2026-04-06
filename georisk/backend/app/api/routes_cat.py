@@ -3,7 +3,10 @@ CAT modelling API routes.
 Provides stochastic simulation, location-level HVE drill-down,
 EP curves, technical pricing, and diversification.
 """
+import json
 import logging
+import uuid as _uuid
+from datetime import datetime, timezone
 from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel
 
@@ -28,6 +31,150 @@ class RunModelRequest(BaseModel):
     max_properties: int = 200
 
 
+@router.get("/event-sets")
+async def list_event_sets(
+    session_id: str,
+    property_id: int | None = None,
+    peril: str | None = None,
+    model_id: str | None = None,
+):
+    duck = get_duckdb_conn()
+    clauses = ["session_id = ?"]
+    params: list = [session_id]
+    if property_id is not None:
+        clauses.append("property_id = ?")
+        params.append(int(property_id))
+    if peril:
+        clauses.append("peril = ?")
+        params.append(str(peril))
+    if model_id:
+        clauses.append("model_id = ?")
+        params.append(str(model_id))
+
+    where = " AND ".join(clauses)
+    rows = duck.execute(
+        f"""SELECT event_set_id, session_id, portfolio_id, property_id, peril, model_id,
+                   n_years, seed, params_used, created_at, notes
+            FROM cat_event_sets
+            WHERE {where}
+            ORDER BY property_id, peril, model_id""",
+        params,
+    ).fetchall()
+    cols = [d[0] for d in duck.description] if duck.description else []
+    duck.close()
+    return [dict(zip(cols, r)) for r in rows]
+
+
+@router.get("/event-set/{event_set_id}")
+async def get_event_set(event_set_id: str, include_annual_losses: bool = True, include_events: bool = True):
+    duck = get_duckdb_conn()
+    meta = duck.execute(
+        """SELECT event_set_id, session_id, portfolio_id, property_id, peril, model_id,
+                  n_years, seed, params_used, created_at, notes
+           FROM cat_event_sets WHERE event_set_id = ?""",
+        [event_set_id],
+    ).fetchone()
+    if not meta:
+        duck.close()
+        raise HTTPException(status_code=404, detail="Event set not found")
+
+    mcols = [d[0] for d in duck.description] if duck.description else []
+    meta_d = dict(zip(mcols, meta))
+
+    annual_losses = None
+    if include_annual_losses:
+        al = duck.execute(
+            "SELECT year, annual_loss FROM cat_annual_losses WHERE event_set_id = ? ORDER BY year",
+            [event_set_id],
+        ).fetchall()
+        annual_losses = [{"year": int(y), "annual_loss": float(v)} for y, v in al]
+
+    events = None
+    if include_events:
+        ev = duck.execute(
+            """SELECT year, event_index, intensity, intensity_unit, mean_dr, dr, loss
+               FROM cat_events WHERE event_set_id = ?
+               ORDER BY loss DESC, year ASC, event_index ASC""",
+            [event_set_id],
+        ).fetchall()
+        events = [
+            {
+                "year": int(r[0]),
+                "event_index": int(r[1]),
+                "intensity": float(r[2]),
+                "intensity_unit": str(r[3]),
+                "mean_dr": float(r[4]),
+                "dr": float(r[5]),
+                "loss": float(r[6]),
+            }
+            for r in ev
+        ]
+
+    duck.close()
+    return {"meta": meta_d, "annual_losses": annual_losses, "events": events}
+
+
+@router.get("/event-set/{event_set_id}/events")
+async def get_event_set_events(
+    event_set_id: str,
+    page: int = Query(1, ge=1),
+    page_size: int = Query(200, ge=50, le=2000),
+    year_min: int | None = None,
+    year_max: int | None = None,
+    loss_min: float | None = None,
+    loss_max: float | None = None,
+    intensity_min: float | None = None,
+    intensity_max: float | None = None,
+):
+    duck = get_duckdb_conn()
+    clauses = ["event_set_id = ?"]
+    params: list = [event_set_id]
+    if year_min is not None:
+        clauses.append("year >= ?"); params.append(int(year_min))
+    if year_max is not None:
+        clauses.append("year <= ?"); params.append(int(year_max))
+    if loss_min is not None:
+        clauses.append("loss >= ?"); params.append(float(loss_min))
+    if loss_max is not None:
+        clauses.append("loss <= ?"); params.append(float(loss_max))
+    if intensity_min is not None:
+        clauses.append("intensity >= ?"); params.append(float(intensity_min))
+    if intensity_max is not None:
+        clauses.append("intensity <= ?"); params.append(float(intensity_max))
+
+    where = " AND ".join(clauses)
+    total = duck.execute(f"SELECT COUNT(*) FROM cat_events WHERE {where}", params).fetchone()[0]
+    offset = (page - 1) * page_size
+    rows = duck.execute(
+        f"""SELECT year, event_index, intensity, intensity_unit, mean_dr, dr, loss
+            FROM cat_events
+            WHERE {where}
+            ORDER BY loss DESC, year ASC, event_index ASC
+            LIMIT {page_size} OFFSET {offset}""",
+        params,
+    ).fetchall()
+    duck.close()
+    return {
+        "event_set_id": event_set_id,
+        "total": int(total),
+        "page": int(page),
+        "page_size": int(page_size),
+        "pages": max(1, (int(total) + int(page_size) - 1) // int(page_size)),
+        "results": [
+            {
+                "year": int(r[0]),
+                "event_index": int(r[1]),
+                "intensity": float(r[2]),
+                "intensity_unit": str(r[3]),
+                "mean_dr": float(r[4]),
+                "dr": float(r[5]),
+                "loss": float(r[6]),
+            }
+            for r in rows
+        ],
+    }
+
+
 @router.post("/run-model")
 async def run_cat_model(req: RunModelRequest):
     duck = get_duckdb_conn()
@@ -41,10 +188,18 @@ async def run_cat_model(req: RunModelRequest):
            LIMIT ?""",
         [req.portfolio_id, req.max_properties],
     ).fetchall()
-    duck.close()
 
     if not rows:
+        duck.close()
         raise HTTPException(status_code=404, detail="Portfolio not found or empty")
+
+    session_id = str(_uuid.uuid4())[:8]
+    now_ts = datetime.now(timezone.utc).isoformat()
+    pname_row = duck.execute("SELECT name FROM cat_portfolios WHERE portfolio_id = ?", [req.portfolio_id]).fetchone()
+    session_name = pname_row[0] if pname_row else req.portfolio_id
+
+    # Results are keyed by portfolio_id in current schema; clear to avoid duplicates across reruns.
+    duck.execute("DELETE FROM cat_results WHERE portfolio_id = ?", [req.portfolio_id])
 
     all_results = []
     for pid, lat, lon, tiv, ctype, occ, stories in rows:
@@ -57,9 +212,62 @@ async def run_cat_model(req: RunModelRequest):
             lat, lon, tiv, str(ctype), str(occ), int(stories),
             pga, flood_info["flood_zone"], wind_info["max_wind_prob"],
             n_years=req.n_years, seed=int(pid) % (2**31),
+            collect_events=True,
+            top_k_events=150,
+            random_k_events=150,
         )
         blended = blend_models(raw)
         pricing = compute_technical_price(tiv, blended)
+
+        # Persist event sets (metadata + annual loss series + sampled events)
+        max_annual_years = min(int(req.n_years), 5000)
+        for peril, models in raw.items():
+            for model_id, res in models.items():
+                event_set_id = str(_uuid.uuid4())
+                duck.execute(
+                    """INSERT INTO cat_event_sets
+                       (event_set_id, session_id, portfolio_id, property_id, peril, model_id,
+                        n_years, seed, params_used, created_at, notes)
+                       VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
+                    [
+                        event_set_id,
+                        session_id,
+                        req.portfolio_id,
+                        int(pid),
+                        str(peril),
+                        str(model_id),
+                        int(res.n_years),
+                        int(pid) % (2**31),
+                        json.dumps(res.params_used or {}),
+                        now_ts,
+                        "annual_losses stored up to 5000 years; events are sampled (top+random)",
+                    ],
+                )
+
+                if max_annual_years > 0 and getattr(res, "annual_losses", None) is not None:
+                    annual = res.annual_losses[:max_annual_years]
+                    for yi, loss_val in enumerate(annual, start=1):
+                        duck.execute(
+                            "INSERT INTO cat_annual_losses (event_set_id, year, annual_loss) VALUES (?,?,?)",
+                            [event_set_id, int(yi), float(loss_val)],
+                        )
+
+                for ev in (res.event_sample or []):
+                    duck.execute(
+                        """INSERT INTO cat_events
+                           (event_set_id, year, event_index, intensity, intensity_unit, mean_dr, dr, loss)
+                           VALUES (?,?,?,?,?,?,?,?)""",
+                        [
+                            event_set_id,
+                            int(ev.get("year", 0) or 0),
+                            int(ev.get("event_index", 0) or 0),
+                            float(ev.get("intensity", 0.0) or 0.0),
+                            str(getattr(res, "intensity_unit", "") or ""),
+                            float(ev.get("mean_dr", 0.0) or 0.0),
+                            float(ev.get("dr", 0.0) or 0.0),
+                            float(ev.get("loss", 0.0) or 0.0),
+                        ],
+                    )
 
         all_results.append({
             "property_id": int(pid),
@@ -76,7 +284,6 @@ async def run_cat_model(req: RunModelRequest):
     portfolio_tiv = sum(r["tiv"] for r in all_results)
     portfolio_premium = sum(r["pricing"]["total_premium"] for r in all_results)
 
-    duck = get_duckdb_conn()
     for r in all_results:
         for peril in ["seismic", "flood", "wind"]:
             pb = r["pricing"]["peril_breakdown"].get(peril, {})
@@ -91,9 +298,19 @@ async def run_cat_model(req: RunModelRequest):
                  pb.get("oep_100", 0), pb.get("oep_250", 0), pb.get("oep_500", 0),
                  pb.get("technical_rate_pct", 0), pb.get("loaded_rate_pct", 0), 0],
             )
+    duck.execute(
+        """INSERT INTO cat_sessions (session_id, portfolio_id, name, status, portfolio_tiv,
+           portfolio_aal, portfolio_premium, n_properties, model_config, created_at, completed_at)
+           VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
+        [session_id, req.portfolio_id, session_name, "modelled",
+         round(portfolio_tiv, 2), round(portfolio_aal, 2), round(portfolio_premium, 2),
+         len(all_results), json.dumps({"n_years": req.n_years, "max_properties": req.max_properties}),
+         now_ts, now_ts],
+    )
     duck.close()
 
     return {
+        "session_id": session_id,
         "portfolio_id": req.portfolio_id,
         "n_properties": len(all_results),
         "n_years": req.n_years,
@@ -327,3 +544,70 @@ async def get_diversification(portfolio_id: str, return_period: int = Query(250)
         })
 
     return compute_diversification(property_results, return_period=return_period)
+
+
+@router.get("/sessions")
+async def list_sessions():
+    duck = get_duckdb_conn()
+    rows = duck.execute(
+        """SELECT session_id, portfolio_id, name, status, portfolio_tiv,
+                  portfolio_aal, portfolio_premium, n_properties, model_config,
+                  created_at, completed_at
+           FROM cat_sessions ORDER BY created_at DESC"""
+    ).fetchall()
+    cols = [d[0] for d in duck.description] if duck.description else []
+    duck.close()
+    return [dict(zip(cols, r)) for r in rows]
+
+
+@router.get("/sessions/{session_id}")
+async def get_session(session_id: str):
+    duck = get_duckdb_conn()
+    row = duck.execute("SELECT * FROM cat_sessions WHERE session_id = ?", [session_id]).fetchone()
+    if not row:
+        duck.close()
+        raise HTTPException(status_code=404, detail="Session not found")
+    cols = [d[0] for d in duck.description]
+    session = dict(zip(cols, row))
+    pid = session["portfolio_id"]
+
+    results = duck.execute(
+        """SELECT property_id, peril, aal, oep_100, oep_250, oep_500, technical_rate, loaded_rate
+           FROM cat_results WHERE portfolio_id = ? ORDER BY aal DESC""",
+        [pid],
+    ).fetchall()
+    rcols = [d[0] for d in duck.description]
+
+    props = duck.execute(
+        """SELECT p.property_id, p.latitude, p.longitude, p.tiv, p.construction_type, p.occupancy
+           FROM cat_portfolio_members m
+           JOIN synthetic_properties p ON m.property_id = p.property_id
+           WHERE m.portfolio_id = ?
+           ORDER BY p.tiv DESC LIMIT 500""",
+        [pid],
+    ).fetchall()
+    duck.close()
+
+    return {
+        "session": session,
+        "results": [dict(zip(rcols, r)) for r in results],
+        "properties": [
+            {"property_id": int(p[0]), "latitude": float(p[1]), "longitude": float(p[2]),
+             "tiv": float(p[3]), "construction_type": str(p[4]), "occupancy": str(p[5])}
+            for p in props
+        ],
+    }
+
+
+@router.delete("/sessions/{session_id}")
+async def delete_session(session_id: str):
+    duck = get_duckdb_conn()
+    row = duck.execute("SELECT portfolio_id FROM cat_sessions WHERE session_id = ?", [session_id]).fetchone()
+    if not row:
+        duck.close()
+        raise HTTPException(status_code=404, detail="Session not found")
+    pid = row[0]
+    duck.execute("DELETE FROM cat_results WHERE portfolio_id = ?", [pid])
+    duck.execute("DELETE FROM cat_sessions WHERE session_id = ?", [session_id])
+    duck.close()
+    return {"status": "deleted", "session_id": session_id}

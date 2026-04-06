@@ -6,6 +6,18 @@ import type { Property } from '../../types';
 const STYLE_URL = 'https://basemaps.cartocdn.com/gl/dark-matter-gl-style/style.json';
 const LIGHT_STYLE = 'https://basemaps.cartocdn.com/gl/positron-gl-style/style.json';
 
+export type ColorByField = 'composite_score' | 'seismic_score' | 'flood_score' | 'wind_score' | 'aal' | 'tiv' | 'dominant_peril';
+
+const COLOR_EXPRESSIONS: Record<string, any> = {
+  composite_score: ['interpolate', ['linear'], ['get', 'composite_score'], 0, '#4caf50', 30, '#fdd835', 60, '#ff9800', 80, '#f44336', 100, '#880e4f'],
+  seismic_score: ['interpolate', ['linear'], ['get', 'seismic_score'], 0, '#e8eaf6', 50, '#f44336', 100, '#880e4f'],
+  flood_score: ['interpolate', ['linear'], ['get', 'flood_score'], 0, '#e3f2fd', 50, '#1976d2', 100, '#0d47a1'],
+  wind_score: ['interpolate', ['linear'], ['get', 'wind_score'], 0, '#fff3e0', 50, '#ff9800', 100, '#e65100'],
+  aal: ['interpolate', ['linear'], ['get', 'aal'], 0, '#e3f2fd', 5000, '#ff9800', 50000, '#f44336', 200000, '#880e4f'],
+  tiv: ['interpolate', ['linear'], ['get', 'tiv'], 100000, '#e8f5e9', 1000000, '#fdd835', 5000000, '#ff9800', 15000000, '#f44336'],
+  dominant_peril: ['match', ['get', 'dominant_peril'], 'seismic', '#f44336', 'flood', '#2196f3', 'wind', '#ff9800', '#999999'],
+};
+
 interface MapContainerProps {
   layers: {
     earthquakes: GeoJSON.FeatureCollection | null;
@@ -21,6 +33,14 @@ interface MapContainerProps {
   isDark: boolean;
   enableBboxSelect?: boolean;
   onBboxSelect?: (bbox: [number, number, number, number]) => void;
+  catPropertiesGeoJSON?: GeoJSON.FeatureCollection | null;
+  colorByField?: ColorByField;
+  onCatPropertyClick?: (propertyId: number, coords?: [number, number]) => void;
+  aalHeatmapGeoJSON?: GeoJSON.FeatureCollection | null;
+  selectedCatPropertyId?: number | null;
+  selectedCatCoords?: [number, number] | null;
+  selectedCatIds?: number[];
+  onCatBoxSelectIds?: (ids: number[], bbox: [number, number, number, number]) => void;
 }
 
 export function MapContainer({
@@ -32,6 +52,14 @@ export function MapContainer({
   isDark,
   enableBboxSelect,
   onBboxSelect,
+  catPropertiesGeoJSON,
+  colorByField = 'composite_score',
+  onCatPropertyClick,
+  aalHeatmapGeoJSON,
+  selectedCatPropertyId = null,
+  selectedCatCoords = null,
+  selectedCatIds = [],
+  onCatBoxSelectIds,
 }: MapContainerProps) {
   const mapContainer = useRef<HTMLDivElement>(null);
   const map = useRef<maplibregl.Map | null>(null);
@@ -64,9 +92,12 @@ export function MapContainer({
   }, []);
 
   useEffect(() => {
-    if (!map.current || !mapLoaded) return;
-    map.current.setStyle(isDark ? STYLE_URL : LIGHT_STYLE);
-    map.current.once('style.load', () => setMapLoaded(true));
+    const m = map.current;
+    if (!m || !mapLoaded) return;
+    // Changing style clears sources/layers; force effects to re-run.
+    setMapLoaded(false);
+    m.setStyle(isDark ? STYLE_URL : LIGHT_STYLE);
+    m.once('style.load', () => setMapLoaded(true));
   }, [isDark]);
 
   const addOrUpdateSource = useCallback(
@@ -260,6 +291,9 @@ export function MapContainer({
       flood_zones: ['flood-zones-fill', 'flood-zones-outline'],
       hurricane_tracks: ['hurricane-tracks-line'],
       properties: ['properties-circle', 'properties-label'],
+      cat_properties: ['cat-properties-circle'],
+      aal_heatmap: ['aal-heatmap-layer'],
+      portfolio_heat: ['portfolio-heat'],
     };
 
     for (const [key, layerIds] of Object.entries(layerMap)) {
@@ -287,6 +321,144 @@ export function MapContainer({
 
     return () => { marker.remove(); };
   }, [highlightCoords]);
+
+  useEffect(() => {
+    const m = map.current;
+    if (!m || !mapLoaded) return;
+
+    if (catPropertiesGeoJSON) {
+      addOrUpdateSource('cat-properties', catPropertiesGeoJSON);
+      if (!m.getLayer('cat-properties-circle')) {
+        m.addLayer({
+          id: 'cat-properties-circle',
+          type: 'circle',
+          source: 'cat-properties',
+          paint: {
+            'circle-radius': ['interpolate', ['linear'], ['get', 'tiv'], 100000, 4, 1000000, 7, 10000000, 14],
+            'circle-color': COLOR_EXPRESSIONS[colorByField] || COLOR_EXPRESSIONS.composite_score,
+            'circle-opacity': 0.85,
+            'circle-stroke-width': 1,
+            'circle-stroke-color': '#fff',
+          },
+        });
+
+        m.on('click', 'cat-properties-circle', (e) => {
+          if (e.features?.[0] && onCatPropertyClick) {
+            const f = e.features[0];
+            const id = f.properties?.id;
+            const coords = (f.geometry as GeoJSON.Point).coordinates;
+            if (typeof id === 'number' && Array.isArray(coords) && coords.length >= 2) {
+              onCatPropertyClick(id, [coords[0], coords[1]]);
+            } else if (typeof id === 'number') {
+              onCatPropertyClick(id);
+            }
+          }
+        });
+        m.on('mouseenter', 'cat-properties-circle', () => { m.getCanvas().style.cursor = 'pointer'; });
+        m.on('mouseleave', 'cat-properties-circle', () => { m.getCanvas().style.cursor = ''; });
+      } else {
+        m.setPaintProperty('cat-properties-circle', 'circle-color',
+          COLOR_EXPRESSIONS[colorByField] || COLOR_EXPRESSIONS.composite_score);
+      }
+    } else {
+      if (m.getLayer('cat-properties-circle')) {
+        m.removeLayer('cat-properties-circle');
+      }
+      if (m.getLayer('cat-properties-selected')) {
+        m.removeLayer('cat-properties-selected');
+      }
+      if (m.getSource('cat-properties')) {
+        m.removeSource('cat-properties');
+      }
+    }
+  }, [catPropertiesGeoJSON, colorByField, mapLoaded, addOrUpdateSource, onCatPropertyClick]);
+
+  useEffect(() => {
+    const m = map.current;
+    if (!m || !mapLoaded) return;
+    if (!catPropertiesGeoJSON) return;
+    if (!m.getLayer('cat-properties-circle')) return;
+
+    const hasSelected = typeof selectedCatPropertyId === 'number';
+
+    if (hasSelected) {
+      if (!m.getLayer('cat-properties-selected')) {
+        // Put selected ring above base layer.
+        m.addLayer({
+          id: 'cat-properties-selected',
+          type: 'circle',
+          source: 'cat-properties',
+          filter: ['==', ['get', 'id'], selectedCatPropertyId],
+          paint: {
+            'circle-radius': ['+', ['interpolate', ['linear'], ['get', 'tiv'], 100000, 4, 1000000, 7, 10000000, 14], 4],
+            'circle-color': 'rgba(0,0,0,0)',
+            'circle-stroke-width': 3,
+            'circle-stroke-color': '#00e5ff',
+            'circle-opacity': 1,
+          },
+        });
+      } else {
+        m.setFilter('cat-properties-selected', ['==', ['get', 'id'], selectedCatPropertyId]);
+      }
+    } else if (m.getLayer('cat-properties-selected')) {
+      m.removeLayer('cat-properties-selected');
+    }
+  }, [catPropertiesGeoJSON, mapLoaded, selectedCatPropertyId]);
+
+  useEffect(() => {
+    const m = map.current;
+    if (!m || !mapLoaded) return;
+    if (!m.getLayer('cat-properties-circle')) return;
+
+    const ids = (selectedCatIds || []).filter((x) => typeof x === 'number');
+    if (ids.length === 0) {
+      m.setPaintProperty('cat-properties-circle', 'circle-opacity', 0.85);
+      return;
+    }
+    // Dim non-selected points when we have a multi-selection.
+    m.setPaintProperty('cat-properties-circle', 'circle-opacity', [
+      'case',
+      ['in', ['get', 'id'], ['literal', ids]],
+      0.95,
+      0.18,
+    ]);
+  }, [mapLoaded, selectedCatIds]);
+
+  useEffect(() => {
+    const m = map.current;
+    if (!m || !selectedCatCoords) return;
+    m.flyTo({ center: selectedCatCoords, zoom: 10, duration: 900 });
+  }, [selectedCatCoords]);
+
+  useEffect(() => {
+    const m = map.current;
+    if (!m || !mapLoaded) return;
+
+    if (aalHeatmapGeoJSON) {
+      addOrUpdateSource('aal-heatmap', aalHeatmapGeoJSON);
+      if (!m.getLayer('aal-heatmap-layer')) {
+        m.addLayer({
+          id: 'aal-heatmap-layer',
+          type: 'heatmap',
+          source: 'aal-heatmap',
+          paint: {
+            'heatmap-weight': ['interpolate', ['linear'], ['get', 'aal'], 0, 0, 100000, 1],
+            'heatmap-intensity': 0.8,
+            'heatmap-radius': 25,
+            'heatmap-opacity': 0.6,
+            'heatmap-color': [
+              'interpolate', ['linear'], ['heatmap-density'],
+              0, 'rgba(0,0,0,0)', 0.2, '#2196f3', 0.4, '#4caf50',
+              0.6, '#fdd835', 0.8, '#f44336', 1, '#880e4f',
+            ],
+          },
+        });
+      }
+    } else {
+      if (m.getLayer('aal-heatmap-layer')) m.removeLayer('aal-heatmap-layer');
+      if (m.getSource('aal-heatmap')) m.removeSource('aal-heatmap');
+    }
+  }, [aalHeatmapGeoJSON, mapLoaded, addOrUpdateSource]);
 
   useEffect(() => {
     const m = map.current;
@@ -319,13 +491,40 @@ export function MapContainer({
 
       const onMouseUp = (ev: maplibregl.MapMouseEvent) => {
         m.dragPan.enable();
+        const startPt = start ? m.project(start) : null;
+        const curPt = m.project(ev.lngLat);
         if (start && onBboxSelect) {
           const west = Math.min(start.lng, ev.lngLat.lng);
           const south = Math.min(start.lat, ev.lngLat.lat);
           const east = Math.max(start.lng, ev.lngLat.lng);
           const north = Math.max(start.lat, ev.lngLat.lat);
           if (Math.abs(east - west) > 0.01 && Math.abs(north - south) > 0.01) {
-            onBboxSelect([west, south, east, north]);
+            const bboxLngLat: [number, number, number, number] = [west, south, east, north];
+            onBboxSelect(bboxLngLat);
+
+            if (startPt && onCatBoxSelectIds && m.getLayer('cat-properties-circle')) {
+              const minX = Math.min(startPt.x, curPt.x);
+              const maxX = Math.max(startPt.x, curPt.x);
+              const minY = Math.min(startPt.y, curPt.y);
+              const maxY = Math.max(startPt.y, curPt.y);
+              const feats = m.queryRenderedFeatures(
+                [
+                  [minX, minY],
+                  [maxX, maxY],
+                ],
+                { layers: ['cat-properties-circle'] }
+              ) as any[];
+              const ids: number[] = [];
+              const seen = new Set<number>();
+              for (const f of feats || []) {
+                const id = f?.properties?.id;
+                if (typeof id === 'number' && !seen.has(id)) {
+                  seen.add(id);
+                  ids.push(id);
+                }
+              }
+              onCatBoxSelectIds(ids, bboxLngLat);
+            }
           }
         }
         if (box) { box.remove(); box = null; }
@@ -340,7 +539,7 @@ export function MapContainer({
 
     m.on('mousedown', onMouseDown as any);
     return () => { m.off('mousedown', onMouseDown as any); };
-  }, [enableBboxSelect, onBboxSelect, mapLoaded]);
+  }, [enableBboxSelect, onBboxSelect, onCatBoxSelectIds, mapLoaded]);
 
   return <div ref={mapContainer} className="map-container" />;
 }

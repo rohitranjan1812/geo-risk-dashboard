@@ -198,6 +198,57 @@ def init_database():
         )
     """)
 
+    duck.execute("""
+        CREATE TABLE IF NOT EXISTS cat_sessions (
+            session_id TEXT,
+            portfolio_id TEXT,
+            name TEXT,
+            status TEXT DEFAULT 'created',
+            portfolio_tiv DOUBLE,
+            portfolio_aal DOUBLE,
+            portfolio_premium DOUBLE,
+            n_properties INTEGER,
+            model_config TEXT,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            completed_at TIMESTAMP
+        )
+    """)
+
+    duck.execute("""
+        CREATE TABLE IF NOT EXISTS cat_event_sets (
+            event_set_id TEXT,
+            session_id TEXT,
+            portfolio_id TEXT,
+            property_id BIGINT,
+            peril TEXT,
+            model_id TEXT,
+            n_years INTEGER,
+            seed BIGINT,
+            params_used TEXT,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            notes TEXT
+        )
+    """)
+    duck.execute("""
+        CREATE TABLE IF NOT EXISTS cat_annual_losses (
+            event_set_id TEXT,
+            year INTEGER,
+            annual_loss DOUBLE
+        )
+    """)
+    duck.execute("""
+        CREATE TABLE IF NOT EXISTS cat_events (
+            event_set_id TEXT,
+            year INTEGER,
+            event_index INTEGER,
+            intensity DOUBLE,
+            intensity_unit TEXT,
+            mean_dr DOUBLE,
+            dr DOUBLE,
+            loss DOUBLE
+        )
+    """)
+
     target = int(getattr(settings, "SYNTHETIC_PROPERTIES_COUNT", 0) or 0)
     if target > 0:
         existing = duck.execute("SELECT COUNT(*) FROM synthetic_properties").fetchone()[0]
