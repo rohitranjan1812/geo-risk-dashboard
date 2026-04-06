@@ -50,6 +50,27 @@ class USGSEarthquakeScraper(BaseScraper):
         }
 
 
+class USGSHazardZonesScraper(BaseScraper):
+    """
+    Maintains our locally-bundled seismic hazard zones GeoJSON and updates the data catalog
+    so the UI shows `usgs_hazard` as fresh.
+    """
+
+    SOURCE_NAME = "usgs_hazard"
+    RATE_LIMIT_DELAY = 0.0
+
+    async def scrape(self) -> dict:
+        geojson = get_seismic_hazard_zones()
+        filepath = self.save_geojson(geojson, "seismic_hazard_zones.geojson")
+        records = len(geojson.get("features", []))
+        return {
+            "status": "success",
+            "source": self.SOURCE_NAME,
+            "records": records,
+            "file_path": str(filepath),
+        }
+
+
 SEISMIC_HAZARD_ZONES = {
     "type": "FeatureCollection",
     "features": [

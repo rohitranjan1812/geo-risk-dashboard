@@ -4,7 +4,7 @@ from fastapi import APIRouter, HTTPException
 
 from app.models.database import sqlite_session
 from app.models.schemas import ScrapeStatus, ScrapeRequest, ScrapeResult
-from app.scrapers.usgs_seismic import USGSEarthquakeScraper
+from app.scrapers.usgs_seismic import USGSEarthquakeScraper, USGSHazardZonesScraper
 from app.scrapers.fema_flood import FEMAFloodScraper
 from app.scrapers.noaa_hurricane import NOAAHurricaneScraper
 
@@ -13,6 +13,7 @@ router = APIRouter()
 
 SCRAPER_MAP = {
     "usgs_earthquake": USGSEarthquakeScraper,
+    "usgs_hazard": USGSHazardZonesScraper,
     "fema_flood": FEMAFloodScraper,
     "noaa_hurricane": NOAAHurricaneScraper,
 }

@@ -1,4 +1,4 @@
-import { MapPin, Briefcase, Radio, Sun, Moon } from 'lucide-react';
+import { MapPin, Briefcase, Radio, BarChart3, Sun, Moon } from 'lucide-react';
 import type { Journey, ThemeMode } from '../../types';
 
 interface SidebarProps {
@@ -11,6 +11,7 @@ interface SidebarProps {
 const journeys = [
   { id: 'explorer' as Journey, label: 'Property Explorer', icon: MapPin, desc: 'Assess individual property risk' },
   { id: 'portfolio' as Journey, label: 'Portfolio Manager', icon: Briefcase, desc: 'Analyze portfolio accumulation' },
+  { id: 'cat' as Journey, label: 'CAT Modelling', icon: BarChart3, desc: 'Stochastic pricing & HVE' },
   { id: 'monitor' as Journey, label: 'Data Monitor', icon: Radio, desc: 'Scrape status & data freshness' },
 ];
 

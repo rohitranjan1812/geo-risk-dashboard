@@ -91,6 +91,6 @@ export interface PortfolioSummary {
   }>;
 }
 
-export type Journey = 'explorer' | 'portfolio' | 'monitor';
+export type Journey = 'explorer' | 'portfolio' | 'cat' | 'monitor';
 
 export type ThemeMode = 'dark' | 'light';
