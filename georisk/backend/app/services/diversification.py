@@ -40,11 +40,11 @@ def compute_diversification(
 
     n = len(standalone_pmls)
     corr_factor = 0.3
-    portfolio_pml = float(np.sqrt(np.sum(standalone_pmls_arr ** 2) +
-                                   2 * corr_factor * np.sum(
-                                       standalone_pmls_arr[i] * standalone_pmls_arr[j]
-                                       for i in range(n) for j in range(i + 1, n)
-                                   )))
+    # Approximate portfolio aggregation with a constant correlation factor.
+    # Use a vectorized cross-term: 2 * sum_{i<j} x_i x_j = (sum x)^2 - sum(x^2)
+    sum_sq = float(np.sum(standalone_pmls_arr ** 2))
+    cross_term = float(np.sum(standalone_pmls_arr) ** 2 - sum_sq)
+    portfolio_pml = float(np.sqrt(sum_sq + corr_factor * cross_term))
 
     diversification_benefit = max(0, sum_standalone - portfolio_pml)
     diversification_pct = diversification_benefit / sum_standalone * 100 if sum_standalone > 0 else 0
@@ -53,12 +53,9 @@ def compute_diversification(
     for i, (pid, sa_pml, aal) in enumerate(zip(property_ids, standalone_pmls, aals)):
         remaining = np.delete(standalone_pmls_arr, i)
         if len(remaining) > 0:
-            portfolio_without = float(np.sqrt(np.sum(remaining ** 2) +
-                                              2 * corr_factor * np.sum(
-                                                  remaining[ii] * remaining[jj]
-                                                  for ii in range(len(remaining))
-                                                  for jj in range(ii + 1, len(remaining))
-                                              )))
+            rem_sum_sq = float(np.sum(remaining ** 2))
+            rem_cross = float(np.sum(remaining) ** 2 - rem_sum_sq)
+            portfolio_without = float(np.sqrt(rem_sum_sq + corr_factor * rem_cross))
         else:
             portfolio_without = 0.0
 

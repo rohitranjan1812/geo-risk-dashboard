@@ -183,6 +183,7 @@ def init_database():
     """)
     duck.execute("""
         CREATE TABLE IF NOT EXISTS cat_results (
+            session_id TEXT,
             portfolio_id TEXT,
             property_id BIGINT,
             peril TEXT,
@@ -197,6 +198,13 @@ def init_database():
             scored_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     """)
+
+    # Lightweight schema evolution for existing local DBs.
+    # DuckDB supports ADD COLUMN; ignore if already present.
+    try:
+        duck.execute("ALTER TABLE cat_results ADD COLUMN session_id TEXT")
+    except Exception:
+        pass
 
     duck.execute("""
         CREATE TABLE IF NOT EXISTS cat_sessions (

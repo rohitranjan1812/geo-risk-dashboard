@@ -422,8 +422,28 @@ async def portfolio_geojson(portfolio_id: str, limit: int = Query(5000, ge=100, 
 
 
 @router.get("/portfolio/{portfolio_id}/scored-geojson")
-async def portfolio_scored_geojson(portfolio_id: str, limit: int = Query(5000, ge=100, le=50000)):
+async def portfolio_scored_geojson(
+    portfolio_id: str,
+    limit: int = Query(5000, ge=100, le=50000),
+    session_id: str | None = None,
+):
     duck = get_duckdb_conn()
+    sid = session_id
+    if not sid:
+        row = duck.execute(
+            """SELECT session_id
+               FROM cat_sessions
+               WHERE portfolio_id = ?
+               ORDER BY created_at DESC
+               LIMIT 1""",
+            [portfolio_id],
+        ).fetchone()
+        sid = str(row[0]) if row and row[0] else None
+
+    if not sid:
+        duck.close()
+        raise HTTPException(status_code=404, detail="No CAT sessions found for this portfolio.")
+
     rows = duck.execute(
         f"""SELECT p.property_id, p.latitude, p.longitude, p.tiv,
                    p.construction_type, p.occupancy,
@@ -433,11 +453,11 @@ async def portfolio_scored_geojson(portfolio_id: str, limit: int = Query(5000, g
                    COALESCE(SUM(cr.aal), 0) as total_aal
             FROM cat_portfolio_members m
             JOIN synthetic_properties p ON m.property_id = p.property_id
-            LEFT JOIN cat_results cr ON cr.property_id = p.property_id AND cr.portfolio_id = m.portfolio_id
+            LEFT JOIN cat_results cr ON cr.property_id = p.property_id AND cr.portfolio_id = m.portfolio_id AND cr.session_id = ?
             WHERE m.portfolio_id = ?
             GROUP BY p.property_id, p.latitude, p.longitude, p.tiv, p.construction_type, p.occupancy
             ORDER BY total_aal DESC LIMIT {limit}""",
-        [portfolio_id],
+        [sid, portfolio_id],
     ).fetchall()
     duck.close()
     features = []

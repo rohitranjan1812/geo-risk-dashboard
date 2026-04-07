@@ -1,23 +1,23 @@
 import { useState, useEffect } from 'react';
-import { Clock, Trash2, Play, FolderOpen, Plus } from 'lucide-react';
+import { Clock, Trash2, FolderOpen, Plus } from 'lucide-react';
 import { LoadingSpinner } from '../common/LoadingSpinner';
-import axios from 'axios';
-
-const API = 'http://localhost:8000/api';
+import { deleteCATSession, fetchCATSessions, fetchCATSession } from '../../api/client';
 
 interface SessionHistoryProps {
   onLoadSession: (session: any) => void;
   onNewAnalysis: () => void;
+  onCompareSessions?: (sessionIds: string[]) => void;
 }
 
-export function SessionHistory({ onLoadSession, onNewAnalysis }: SessionHistoryProps) {
+export function SessionHistory({ onLoadSession, onNewAnalysis, onCompareSessions }: SessionHistoryProps) {
   const [sessions, setSessions] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
+  const [selected, setSelected] = useState<Record<string, boolean>>({});
 
   const load = () => {
     setLoading(true);
-    axios.get(`${API}/cat/sessions`)
-      .then(res => setSessions(res.data))
+    fetchCATSessions()
+      .then(res => setSessions(res))
       .catch(console.error)
       .finally(() => setLoading(false));
   };
@@ -27,13 +27,13 @@ export function SessionHistory({ onLoadSession, onNewAnalysis }: SessionHistoryP
   const handleDelete = async (id: string, e: React.MouseEvent) => {
     e.stopPropagation();
     if (!confirm('Delete this session and its results?')) return;
-    await axios.delete(`${API}/cat/sessions/${id}`);
+    await deleteCATSession(id);
     load();
   };
 
   const handleLoad = async (session: any) => {
     try {
-      const { data } = await axios.get(`${API}/cat/sessions/${session.session_id}`);
+      const data = await fetchCATSession(String(session.session_id));
       onLoadSession(data);
     } catch (e) {
       console.error(e);
@@ -47,11 +47,20 @@ export function SessionHistory({ onLoadSession, onNewAnalysis }: SessionHistoryP
 
   if (loading) return <LoadingSpinner text="Loading sessions..." />;
 
+  const selectedIds = Object.entries(selected).filter(([, v]) => v).map(([k]) => k);
+
   return (
     <div className="session-history">
       <div className="session-header">
         <h2><Clock size={18} /> Analysis History</h2>
-        <button className="btn btn-primary btn-sm" onClick={onNewAnalysis}><Plus size={14} /> New Analysis</button>
+        <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+          {onCompareSessions && selectedIds.length >= 2 && (
+            <button className="btn btn-outline btn-sm" onClick={() => onCompareSessions(selectedIds.slice(0, 3))}>
+              Compare ({selectedIds.length})
+            </button>
+          )}
+          <button className="btn btn-primary btn-sm" onClick={onNewAnalysis}><Plus size={14} /> New Analysis</button>
+        </div>
       </div>
 
       {sessions.length === 0 ? (
@@ -68,6 +77,23 @@ export function SessionHistory({ onLoadSession, onNewAnalysis }: SessionHistoryP
                   <FolderOpen size={14} />
                   <span>{s.name || s.session_id}</span>
                 </div>
+                {onCompareSessions && (
+                  <label
+                    style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 12 }}
+                    onClick={(e) => e.stopPropagation()}
+                    title="Select for comparison"
+                  >
+                    <input
+                      type="checkbox"
+                      checked={!!selected[String(s.session_id)]}
+                      onChange={(e) => {
+                        const sid = String(s.session_id);
+                        setSelected((prev) => ({ ...prev, [sid]: e.target.checked }));
+                      }}
+                    />
+                    Compare
+                  </label>
+                )}
                 <span className="session-status" style={{ color: STATUS_COLORS[s.status] || '#999' }}>
                   {s.status}
                 </span>

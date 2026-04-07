@@ -3,8 +3,8 @@ import { X, MapPin, Mountain, Droplets, Wind, Shield, TrendingUp } from 'lucide-
 import { LoadingSpinner } from '../common/LoadingSpinner';
 import { MDRChart } from './MDRChart';
 import { EPCurveChart } from './EPCurveChart';
-import axios from 'axios';
-import { fetchCatEventSets, fetchCatEventSet } from '../../api/client';
+import { fetchCatEventSets, fetchCatEventSet, fetchCatLocationDetail, getCatExportEventSetUrl } from '../../api/client';
+import { ResponsiveContainer, BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip } from 'recharts';
 
 interface LocationDetailProps {
   propertyId: number;
@@ -26,8 +26,8 @@ export function LocationDetail({ propertyId, sessionId, onClose }: LocationDetai
 
   useEffect(() => {
     setLoading(true);
-    axios.get(`http://localhost:8000/api/cat/location-detail/${propertyId}?n_years=5000`)
-      .then(res => setData(res.data))
+    fetchCatLocationDetail(propertyId, 5000)
+      .then(res => setData(res))
       .catch(err => console.error(err))
       .finally(() => setLoading(false));
   }, [propertyId]);
@@ -57,13 +57,6 @@ export function LocationDetail({ propertyId, sessionId, onClose }: LocationDetai
       .catch((e) => console.error(e));
   }, [selectedEventSetId]);
 
-  if (loading) return <LoadingSpinner text="Running stochastic model..." />;
-  if (!data) return <div className="error-banner">Failed to load location detail</div>;
-
-  const { exposure, hazard, vulnerability, loss, ep_curves } = data;
-  const totalScore = loss.technical_rate_pct || 0;
-  const tier = totalScore < 0.5 ? 'Low' : totalScore < 1.5 ? 'Moderate' : totalScore < 3 ? 'High' : totalScore < 5 ? 'Very High' : 'Extreme';
-
   const eventSetsByPeril = useMemo(() => {
     const out: Record<string, any[]> = { seismic: [], flood: [], wind: [] };
     for (const r of eventSets || []) {
@@ -73,6 +66,36 @@ export function LocationDetail({ propertyId, sessionId, onClose }: LocationDetai
     }
     return out;
   }, [eventSets]);
+
+  const annualLossHistogram = useMemo(() => {
+    const annual = (selectedEventSet?.annual_losses || []) as Array<{ year: number; annual_loss: number }>;
+    if (!annual || annual.length < 10) return [];
+    const values = annual.map((r) => Number(r.annual_loss || 0)).filter((x) => Number.isFinite(x) && x >= 0);
+    if (values.length < 10) return [];
+    const minV = Math.min(...values);
+    const maxV = Math.max(...values);
+    if (!(maxV > minV)) return [];
+    const bins = 24;
+    const width = (maxV - minV) / bins;
+    const counts = new Array(bins).fill(0);
+    for (const v of values) {
+      const idx = Math.min(bins - 1, Math.max(0, Math.floor((v - minV) / width)));
+      counts[idx] += 1;
+    }
+    return counts.map((c, i) => {
+      const lo = minV + i * width;
+      const hi = lo + width;
+      const mid = (lo + hi) / 2;
+      return { bin: i + 1, mid, lo, hi, count: c };
+    });
+  }, [selectedEventSet]);
+
+  if (loading) return <LoadingSpinner text="Running stochastic model..." />;
+  if (!data) return <div className="error-banner">Failed to load location detail</div>;
+
+  const { exposure, hazard, vulnerability, loss, ep_curves } = data;
+  const totalScore = loss.technical_rate_pct || 0;
+  const tier = totalScore < 0.5 ? 'Low' : totalScore < 1.5 ? 'Moderate' : totalScore < 3 ? 'High' : totalScore < 5 ? 'Very High' : 'Extreme';
 
   return (
     <div className="location-detail">
@@ -208,7 +231,18 @@ export function LocationDetail({ propertyId, sessionId, onClose }: LocationDetai
 
               {selectedEventSet && (
                 <div className="hve-sub">
-                  <h4>Sampled events (top losses + random)</h4>
+                  <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8 }}>
+                    <h4>Sampled events (top losses + random)</h4>
+                    <a
+                      className="btn btn-outline btn-sm"
+                      href={getCatExportEventSetUrl(String(selectedEventSetId))}
+                      target="_blank"
+                      rel="noreferrer"
+                      title="Download sampled events as CSV"
+                    >
+                      <TrendingUp size={14} /> Export CSV
+                    </a>
+                  </div>
                   <div className="hve-grid" style={{ marginBottom: 8 }}>
                     <div><span className="hve-label">Peril</span><span className="hve-value">{selectedEventSet.meta?.peril}</span></div>
                     <div><span className="hve-label">Model</span><span className="hve-value">{selectedEventSet.meta?.model_id}</span></div>
@@ -216,6 +250,28 @@ export function LocationDetail({ propertyId, sessionId, onClose }: LocationDetai
                     <div><span className="hve-label">Annual years stored</span><span className="hve-value">{selectedEventSet.annual_losses?.length || 0}</span></div>
                     <div><span className="hve-label">Events stored</span><span className="hve-value">{selectedEventSet.events?.length || 0}</span></div>
                   </div>
+
+                  {annualLossHistogram.length > 0 && (
+                    <div className="chart-container" style={{ marginBottom: 10 }}>
+                      <h4 style={{ marginBottom: 6 }}>Annual Loss Distribution (sample)</h4>
+                      <ResponsiveContainer width="100%" height={180}>
+                        <BarChart data={annualLossHistogram}>
+                          <CartesianGrid strokeDasharray="3 3" stroke="#333" />
+                          <XAxis dataKey="bin" stroke="#aaa" tick={{ fontSize: 10 }} />
+                          <YAxis stroke="#aaa" tick={{ fontSize: 10 }} />
+                          <Tooltip
+                            contentStyle={{ background: '#1a1a2e', border: '1px solid #333', fontSize: 11 }}
+                            formatter={(v: any) => [Number(v || 0).toLocaleString(), 'count']}
+                            labelFormatter={(l: any) => `bin ${l}`}
+                          />
+                          <Bar dataKey="count" fill="rgba(0, 229, 255, 0.55)" />
+                        </BarChart>
+                      </ResponsiveContainer>
+                      <div className="text-muted" style={{ fontSize: 11 }}>
+                        Histogram built from persisted annual losses for this event set (up to 5,000 years stored).
+                      </div>
+                    </div>
+                  )}
 
                   <div className="table-scroll" style={{ maxHeight: 260 }}>
                     <table className="portfolio-table">

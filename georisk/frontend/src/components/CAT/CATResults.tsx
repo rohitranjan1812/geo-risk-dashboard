@@ -1,11 +1,11 @@
-import { useState, useEffect } from 'react';
-import { Play, Download, ArrowUpDown, Shield, TrendingUp, DollarSign, BarChart3, Target } from 'lucide-react';
+import { useState } from 'react';
+import { Play, Download, Shield, TrendingUp, DollarSign, BarChart3, Target } from 'lucide-react';
 import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, Cell, Legend } from 'recharts';
 import { LoadingSpinner } from '../common/LoadingSpinner';
 import { EPCurveChart } from './EPCurveChart';
-import axios from 'axios';
+import { getCatExportEpCurveUrl, getCatExportResultsUrl } from '../../api/client';
+import { fetchCATEpCurve, fetchCATDiversification, runCATModel } from '../../api/client';
 
-const API = 'http://localhost:8000/api';
 const TIER_COLORS: Record<string, string> = { Low: '#4caf50', Moderate: '#ff9800', High: '#f44336', 'Very High': '#d32f2f', Extreme: '#880e4f' };
 
 interface CATResultsProps {
@@ -42,17 +42,17 @@ export function CATResults({
   const runModel = async () => {
     setRunning(true);
     try {
-      const { data } = await axios.post(`${API}/cat/run-model`, {
+      const data = await runCATModel({
         portfolio_id: portfolioId, n_years: 10000, max_properties: Math.min(nProperties, 200),
       });
       setModelResult(data);
       if (onSessionCreated && data?.session_id) onSessionCreated(String(data.session_id));
       const [ep, div] = await Promise.all([
-        axios.get(`${API}/cat/ep-curve/${portfolioId}?n_years=5000&max_properties=100`),
-        axios.get(`${API}/cat/diversification/${portfolioId}?return_period=250`),
+        fetchCATEpCurve(portfolioId, { n_years: 5000, max_properties: 100 }),
+        fetchCATDiversification(portfolioId, 250),
       ]);
-      setEpData(ep.data);
-      setDivData(div.data);
+      setEpData(ep);
+      setDivData(div);
       if (onModelComplete) onModelComplete(portfolioId);
     } catch (e) {
       console.error(e);
@@ -81,9 +81,33 @@ export function CATResults({
             </div>
           )}
         </div>
-        <button className="btn btn-primary" onClick={runModel} disabled={running}>
-          {running ? <LoadingSpinner size={14} text="Running 10K-yr sim..." /> : <><Play size={14} /> Run CAT Model</>}
-        </button>
+        <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+          {modelResult?.session_id && (
+            <>
+              <a
+                className="btn btn-outline btn-sm"
+                href={getCatExportResultsUrl(portfolioId, String(modelResult.session_id))}
+                target="_blank"
+                rel="noreferrer"
+                title="Download account-level results as CSV"
+              >
+                <Download size={14} /> Results CSV
+              </a>
+              <a
+                className="btn btn-outline btn-sm"
+                href={getCatExportEpCurveUrl(portfolioId, String(modelResult.session_id))}
+                target="_blank"
+                rel="noreferrer"
+                title="Download EP curve points as CSV"
+              >
+                <Download size={14} /> EP CSV
+              </a>
+            </>
+          )}
+          <button className="btn btn-primary" onClick={runModel} disabled={running}>
+            {running ? <LoadingSpinner size={14} text="Running 10K-yr sim..." /> : <><Play size={14} /> Run CAT Model</>}
+          </button>
+        </div>
       </div>
 
       {modelResult && (

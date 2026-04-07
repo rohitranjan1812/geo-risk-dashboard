@@ -1,9 +1,7 @@
 import { useState, useEffect } from 'react';
 import { Database, MapPin, X, Zap } from 'lucide-react';
 import { LoadingSpinner } from '../common/LoadingSpinner';
-import axios from 'axios';
-
-const API = 'http://localhost:8000/api';
+import { fetchSyntheticStats, seedSynthetic } from '../../api/client';
 const CONSTRUCTION_TYPES = ['Wood Frame', 'Masonry', 'Reinforced Concrete', 'Steel Frame', 'Concrete Tilt-Up'];
 const OCCUPANCIES = ['Residential', 'Commercial', 'Industrial', 'Hospitality', 'Healthcare'];
 
@@ -24,8 +22,8 @@ export function SeedConfig({ bbox, onClearBbox, onSeeded }: SeedConfigProps) {
   const [loadingStats, setLoadingStats] = useState(true);
 
   useEffect(() => {
-    axios.get(`${API}/synthetic/stats`)
-      .then(res => setStats(res.data))
+    fetchSyntheticStats()
+      .then(res => setStats(res))
       .catch(() => {})
       .finally(() => setLoadingStats(false));
   }, []);
@@ -37,7 +35,7 @@ export function SeedConfig({ bbox, onClearBbox, onSeeded }: SeedConfigProps) {
       if (bbox) body.bbox = bbox;
       if (ctypes.length > 0) body.construction_types = ctypes;
       if (occs.length > 0) body.occupancies = occs;
-      const { data } = await axios.post(`${API}/synthetic/seed`, body);
+      const data = await seedSynthetic(body);
       setStats({ count: data.count });
       onSeeded();
     } catch (e) {

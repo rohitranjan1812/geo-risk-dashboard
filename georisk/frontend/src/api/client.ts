@@ -10,7 +10,7 @@ import type {
 } from '../types';
 
 const api = axios.create({
-  baseURL: 'http://localhost:8000/api',
+  baseURL: import.meta.env.VITE_API_URL || 'http://localhost:8000/api',
   timeout: 60000,
 });
 
@@ -63,6 +63,14 @@ export async function uploadPortfolio(file: File): Promise<PortfolioResult> {
   return data;
 }
 
+export async function runCATForUploadedPortfolio(portfolioId: string, params: { n_years?: number; max_properties?: number } = {}): Promise<any> {
+  const qs = new URLSearchParams();
+  if (params.n_years) qs.set('n_years', String(params.n_years));
+  if (params.max_properties) qs.set('max_properties', String(params.max_properties));
+  const { data } = await api.post(`/portfolio/${encodeURIComponent(portfolioId)}/run-cat?${qs.toString()}`);
+  return data;
+}
+
 export async function fetchPortfolioSummary(portfolioId: string): Promise<PortfolioSummary> {
   const { data } = await api.get(`/portfolio/${portfolioId}/summary`);
   return data;
@@ -79,7 +87,25 @@ export async function fetchPortfolioAccumulation(portfolioId: string): Promise<G
 }
 
 export function getPortfolioExportUrl(portfolioId: string): string {
-  return `http://localhost:8000/api/portfolio/${portfolioId}/export`;
+  const base = import.meta.env.VITE_API_URL || 'http://localhost:8000/api';
+  return `${base}/portfolio/${portfolioId}/export`;
+}
+
+export function getCatExportResultsUrl(portfolioId: string, sessionId?: string | null): string {
+  const base = import.meta.env.VITE_API_URL || 'http://localhost:8000/api';
+  const qs = sessionId ? `?session_id=${encodeURIComponent(String(sessionId))}` : '';
+  return `${base}/cat/export/results/${encodeURIComponent(String(portfolioId))}${qs}`;
+}
+
+export function getCatExportEpCurveUrl(portfolioId: string, sessionId?: string | null): string {
+  const base = import.meta.env.VITE_API_URL || 'http://localhost:8000/api';
+  const qs = sessionId ? `?session_id=${encodeURIComponent(String(sessionId))}` : '';
+  return `${base}/cat/export/ep-curve/${encodeURIComponent(String(portfolioId))}${qs}`;
+}
+
+export function getCatExportEventSetUrl(eventSetId: string): string {
+  const base = import.meta.env.VITE_API_URL || 'http://localhost:8000/api';
+  return `${base}/cat/export/event-set/${encodeURIComponent(String(eventSetId))}`;
 }
 
 export async function fetchSyntheticSummary(sampleN = 20000): Promise<any> {
@@ -117,6 +143,29 @@ export async function deleteCATSession(sessionId: string): Promise<any> {
   return data;
 }
 
+export async function runCATModel(body: { portfolio_id: string; n_years?: number; max_properties?: number }): Promise<any> {
+  const { data } = await api.post('/cat/run-model', body);
+  return data;
+}
+
+export async function fetchCATEpCurve(portfolioId: string, params: { n_years?: number; max_properties?: number } = {}): Promise<any> {
+  const qs = new URLSearchParams();
+  if (params.n_years) qs.set('n_years', String(params.n_years));
+  if (params.max_properties) qs.set('max_properties', String(params.max_properties));
+  const { data } = await api.get(`/cat/ep-curve/${encodeURIComponent(portfolioId)}?${qs.toString()}`);
+  return data;
+}
+
+export async function fetchCATDiversification(portfolioId: string, returnPeriod = 250): Promise<any> {
+  const { data } = await api.get(`/cat/diversification/${encodeURIComponent(portfolioId)}?return_period=${returnPeriod}`);
+  return data;
+}
+
+export async function fetchCatLocationDetail(propertyId: number, nYears = 5000): Promise<any> {
+  const { data } = await api.get(`/cat/location-detail/${propertyId}?n_years=${nYears}`);
+  return data;
+}
+
 export async function fetchPortfolioGeoJSON(portfolioId: string, limit = 5000): Promise<GeoJSON.FeatureCollection> {
   const { data } = await api.get(`/synthetic/portfolio/${portfolioId}/geojson?limit=${limit}`);
   return data;
@@ -124,6 +173,16 @@ export async function fetchPortfolioGeoJSON(portfolioId: string, limit = 5000): 
 
 export async function fetchScoredGeoJSON(portfolioId: string, limit = 5000): Promise<GeoJSON.FeatureCollection> {
   const { data } = await api.get(`/synthetic/portfolio/${portfolioId}/scored-geojson?limit=${limit}`);
+  return data;
+}
+
+export async function filterSynthetic(body: any): Promise<any> {
+  const { data } = await api.post('/synthetic/filter', body);
+  return data;
+}
+
+export async function buildSyntheticPortfolio(body: any): Promise<any> {
+  const { data } = await api.post('/synthetic/build-portfolio', body);
   return data;
 }
 

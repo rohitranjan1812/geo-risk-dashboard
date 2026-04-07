@@ -1,9 +1,7 @@
 import { useState, useCallback } from 'react';
-import { Search, Filter, ChevronLeft, ChevronRight, FolderPlus, MapPin, X } from 'lucide-react';
+import { Filter, ChevronLeft, ChevronRight, FolderPlus, MapPin, X } from 'lucide-react';
 import { LoadingSpinner } from '../common/LoadingSpinner';
-import axios from 'axios';
-
-const API = 'http://localhost:8000/api';
+import { buildSyntheticPortfolio, filterSynthetic } from '../../api/client';
 
 const CONSTRUCTION_TYPES = ['Wood Frame', 'Masonry', 'Reinforced Concrete', 'Steel Frame', 'Concrete Tilt-Up'];
 const OCCUPANCIES = ['Residential', 'Commercial', 'Industrial', 'Hospitality', 'Healthcare'];
@@ -46,7 +44,7 @@ export function SyntheticBrowser({ bbox, onClearBbox, onPortfolioCreated, select
       if (ybMin) body.year_built_min = parseInt(ybMin);
       if (ybMax) body.year_built_max = parseInt(ybMax);
 
-      const { data } = await axios.post(`${API}/synthetic/filter`, body);
+      const data = await filterSynthetic(body);
       setResults(data.results);
       setTotal(data.total);
       setPage(data.page);
@@ -74,7 +72,7 @@ export function SyntheticBrowser({ bbox, onClearBbox, onPortfolioCreated, select
         if (ybMin) body.filter.year_built_min = parseInt(ybMin);
         if (ybMax) body.filter.year_built_max = parseInt(ybMax);
       }
-      const { data } = await axios.post(`${API}/synthetic/build-portfolio`, body);
+      const data = await buildSyntheticPortfolio(body);
       onPortfolioCreated(data.portfolio_id, data.name, data.n_properties);
     } catch (e) {
       console.error(e);

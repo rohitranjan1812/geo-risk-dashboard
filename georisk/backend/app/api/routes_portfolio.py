@@ -12,6 +12,7 @@ from app.models.database import sqlite_session, get_duckdb_conn
 from app.models.schemas import PortfolioSummary, PortfolioPropertyResult
 from app.services.risk_engine import score_property
 from app.services.geocoder import geocode_address
+from app.api.routes_cat import import_uploaded_portfolio, ImportPortfolioRequest, run_cat_model, RunModelRequest
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -268,3 +269,17 @@ async def get_accumulation_geojson(portfolio_id: str):
         })
 
     return {"type": "FeatureCollection", "features": features}
+
+
+@router.post("/{portfolio_id}/run-cat")
+async def run_cat_for_uploaded_portfolio(
+    portfolio_id: str,
+    n_years: int = 10000,
+    max_properties: int = 200,
+):
+    # Import this uploaded portfolio into CAT schema, then run CAT model.
+    await import_uploaded_portfolio(
+        portfolio_id,
+        ImportPortfolioRequest(name=f"Uploaded {portfolio_id}", max_properties=max(1, int(max_properties))),
+    )
+    return await run_cat_model(RunModelRequest(portfolio_id=portfolio_id, n_years=int(n_years), max_properties=int(max_properties)))

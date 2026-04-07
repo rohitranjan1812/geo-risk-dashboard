@@ -17,16 +17,17 @@ import { SyntheticBrowser } from './components/CAT/SyntheticBrowser';
 import { SessionHistory } from './components/CAT/SessionHistory';
 import { CATResults } from './components/CAT/CATResults';
 import { LocationDetail } from './components/CAT/LocationDetail';
+import { SessionCompare } from './components/CAT/SessionCompare';
 import { useMapLayers } from './hooks/useMapLayers';
 import { useRiskQuery } from './hooks/useRiskQuery';
 import { usePortfolio } from './hooks/usePortfolio';
-import { fetchPortfolioAccumulation, fetchSyntheticAccumulationHex, fetchSyntheticSummary } from './api/client';
-import axios from 'axios';
+import { fetchCATSession, fetchPortfolioAccumulation, fetchSyntheticAccumulationHex, fetchSyntheticSummary, runCATForUploadedPortfolio } from './api/client';
+import { fetchScoredGeoJSON, fetchPortfolioGeoJSON } from './api/client';
 import './App.css';
 
-const API = 'http://localhost:8000/api';
+const API = import.meta.env.VITE_API_URL || 'http://localhost:8000/api';
 
-type CatStep = 'seed' | 'browse' | 'history' | 'results' | 'location';
+type CatStep = 'seed' | 'browse' | 'history' | 'results' | 'location' | 'compare';
 
 function App() {
   const [journey, setJourney] = useState<Journey>('explorer');
@@ -40,6 +41,7 @@ function App() {
   const [catPortfolio, setCatPortfolio] = useState<{ id: string; name: string; count: number } | null>(null);
   const [catLocationId, setCatLocationId] = useState<number | null>(null);
   const [catActiveSessionId, setCatActiveSessionId] = useState<string | null>(null);
+  const [catCompareIds, setCatCompareIds] = useState<string[]>([]);
   const [catPropertiesGeoJSON, setCatPropertiesGeoJSON] = useState<GeoJSON.FeatureCollection | null>(null);
   const [aalHeatmapGeoJSON, setAalHeatmapGeoJSON] = useState<GeoJSON.FeatureCollection | null>(null);
   const [colorBy, setColorBy] = useState<ColorByField>('composite_score');
@@ -128,8 +130,8 @@ function App() {
 
   const loadPortfolioOnMap = useCallback(async (pid: string) => {
     try {
-      const { data } = await axios.get(`${API}/synthetic/portfolio/${pid}/geojson?limit=5000`);
-      setCatPropertiesGeoJSON(data);
+      const data = await fetchPortfolioGeoJSON(pid, 5000);
+      setCatPropertiesGeoJSON(data as any);
     } catch (e) {
       console.error(e);
     }
@@ -137,9 +139,9 @@ function App() {
 
   const loadScoredOnMap = useCallback(async (pid: string) => {
     try {
-      const { data } = await axios.get(`${API}/synthetic/portfolio/${pid}/scored-geojson?limit=5000`);
-      setCatPropertiesGeoJSON(data);
-      setAalHeatmapGeoJSON(data);
+      const data = await fetchScoredGeoJSON(pid, 5000);
+      setCatPropertiesGeoJSON(data as any);
+      setAalHeatmapGeoJSON(data as any);
     } catch (e) {
       console.error(e);
     }
@@ -159,6 +161,20 @@ function App() {
     loadScoredOnMap(s.portfolio_id);
     setCatStep('results');
   }, [loadScoredOnMap]);
+
+  const runCatFromUploadedPortfolio = useCallback(async () => {
+    if (!portfolioId) return;
+    try {
+      const r = await runCATForUploadedPortfolio(portfolioId, { n_years: 10000, max_properties: 200 });
+      const sid = String(r?.session_id || '');
+      if (!sid) return;
+      const full = await fetchCATSession(sid);
+      setJourney('cat');
+      handleLoadSession(full);
+    } catch (e) {
+      console.error(e);
+    }
+  }, [portfolioId, handleLoadSession]);
 
   const handleModelComplete = useCallback((pid: string) => {
     loadScoredOnMap(pid);
@@ -235,7 +251,12 @@ function App() {
                 <>
                   <div className="portfolio-header">
                     <h2>Portfolio: {portfolioId}</h2>
-                    <button className="btn btn-outline" onClick={() => { clearPortfolio(); setPortfolioGeoJSON(null); }}>New Upload</button>
+                    <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+                      <button className="btn btn-primary" onClick={runCatFromUploadedPortfolio}>
+                        Run CAT Model
+                      </button>
+                      <button className="btn btn-outline" onClick={() => { clearPortfolio(); setPortfolioGeoJSON(null); }}>New Upload</button>
+                    </div>
                   </div>
                   {uploadErrors.length > 0 && <div className="warning-banner">{uploadErrors.length} row(s) had issues</div>}
                   {portfolioSummary && <PortfolioCharts summary={portfolioSummary} />}
@@ -255,6 +276,11 @@ function App() {
                     onClose={() => { setCatLocationId(null); setCatStep(catPortfolio ? 'results' : 'browse'); }}
                   />
                 </>
+              ) : catStep === 'compare' ? (
+                <SessionCompare
+                  sessionIds={catCompareIds}
+                  onBack={() => setCatStep('history')}
+                />
               ) : catStep === 'results' && catPortfolio ? (
                 <>
                   <CATResults
@@ -303,6 +329,10 @@ function App() {
                 <SessionHistory
                   onLoadSession={handleLoadSession}
                   onNewAnalysis={() => setCatStep('browse')}
+                  onCompareSessions={(ids) => {
+                    setCatCompareIds(ids);
+                    setCatStep('compare');
+                  }}
                 />
               )}
             </div>

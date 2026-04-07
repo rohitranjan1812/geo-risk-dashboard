@@ -9,6 +9,9 @@ import uuid as _uuid
 from datetime import datetime, timezone
 from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel
+from fastapi.responses import StreamingResponse
+import io
+import csv
 
 from app.models.database import get_duckdb_conn, sqlite_session
 from app.scrapers.usgs_seismic import estimate_pga_at_point
@@ -24,11 +27,278 @@ from app.services.diversification import compute_diversification
 logger = logging.getLogger(__name__)
 router = APIRouter()
 
+IMPORT_PORTFOLIO_ID_OFFSET = 900_000_000_000
+
+def _delete_event_sets_for_session(duck, session_id: str) -> None:
+    event_set_ids = [
+        r[0]
+        for r in duck.execute(
+            "SELECT event_set_id FROM cat_event_sets WHERE session_id = ?",
+            [session_id],
+        ).fetchall()
+    ]
+    if not event_set_ids:
+        duck.execute("DELETE FROM cat_event_sets WHERE session_id = ?", [session_id])
+        return
+
+    placeholders = ",".join(["?"] * len(event_set_ids))
+    duck.execute(f"DELETE FROM cat_events WHERE event_set_id IN ({placeholders})", event_set_ids)
+    duck.execute(f"DELETE FROM cat_annual_losses WHERE event_set_id IN ({placeholders})", event_set_ids)
+    duck.execute("DELETE FROM cat_event_sets WHERE session_id = ?", [session_id])
+
+def _latest_session_id_for_portfolio(duck, portfolio_id: str) -> str | None:
+    row = duck.execute(
+        """SELECT session_id
+           FROM cat_sessions
+           WHERE portfolio_id = ?
+           ORDER BY created_at DESC
+           LIMIT 1""",
+        [portfolio_id],
+    ).fetchone()
+    return str(row[0]) if row and row[0] else None
+
+def _csv_response(filename: str, header: list[str], rows: list[list]) -> StreamingResponse:
+    output = io.StringIO()
+    writer = csv.writer(output)
+    writer.writerow(header)
+    for r in rows:
+        writer.writerow(r)
+    output.seek(0)
+    return StreamingResponse(
+        iter([output.getvalue()]),
+        media_type="text/csv",
+        headers={"Content-Disposition": f"attachment; filename={filename}"},
+    )
+
 
 class RunModelRequest(BaseModel):
     portfolio_id: str
     n_years: int = 10000
     max_properties: int = 200
+
+
+class RunModelResponse(BaseModel):
+    session_id: str
+    portfolio_id: str
+    n_properties: int
+    n_years: int
+    portfolio_tiv: float
+    portfolio_aal: float
+    portfolio_technical_rate_pct: float
+    portfolio_premium: float
+    diversification: dict
+    properties: list[dict]
+
+
+class ImportPortfolioRequest(BaseModel):
+    name: str | None = None
+    max_properties: int = 500
+
+
+@router.post("/import-portfolio/{portfolio_id}")
+async def import_uploaded_portfolio(portfolio_id: str, req: ImportPortfolioRequest):
+    duck = get_duckdb_conn()
+    prow = duck.execute(
+        """SELECT property_id
+           FROM portfolio_results
+           WHERE portfolio_id = ?
+           ORDER BY composite_score DESC
+           LIMIT ?""",
+        [portfolio_id, int(req.max_properties)],
+    ).fetchall()
+    property_ids = [int(r[0]) for r in (prow or [])]
+    if not property_ids:
+        duck.close()
+        raise HTTPException(status_code=404, detail="Uploaded portfolio not found or empty")
+
+    # Pull richer exposure attributes from SQLite properties table.
+    props: list[dict] = []
+    with sqlite_session() as conn:
+        for pid in property_ids:
+            row = conn.execute("SELECT * FROM properties WHERE id = ?", (pid,)).fetchone()
+            if not row:
+                continue
+            d = dict(row)
+            props.append(d)
+
+    if not props:
+        duck.close()
+        raise HTTPException(status_code=404, detail="No matching properties found in SQLite for this portfolio")
+
+    cat_name = req.name or f"Uploaded Portfolio {portfolio_id}"
+    exists = duck.execute(
+        "SELECT COUNT(*) FROM cat_portfolios WHERE portfolio_id = ?",
+        [portfolio_id],
+    ).fetchone()[0]
+    if int(exists) == 0:
+        duck.execute(
+            "INSERT INTO cat_portfolios (portfolio_id, name, filter_criteria) VALUES (?, ?, ?)",
+            [portfolio_id, cat_name, json.dumps({"source": "uploaded_portfolio", "portfolio_id": portfolio_id})],
+        )
+
+    # Rebuild members.
+    duck.execute("DELETE FROM cat_portfolio_members WHERE portfolio_id = ?", [portfolio_id])
+
+    member_rows: list[list] = []
+    synth_rows: list[list] = []
+    id_map: dict[int, int] = {}
+    for p in props:
+        src_id = int(p["id"])
+        cat_id = int(IMPORT_PORTFOLIO_ID_OFFSET + src_id)
+        id_map[src_id] = cat_id
+        member_rows.append([portfolio_id, cat_id])
+        synth_rows.append([
+            cat_id,
+            float(p.get("latitude", 0.0)),
+            float(p.get("longitude", 0.0)),
+            float(p.get("tiv", 0.0)),
+            str(p.get("construction_type", "Unknown")),
+            str(p.get("occupancy", "Unknown")),
+            int(p.get("year_built") or 0) if p.get("year_built") is not None else None,
+            int(p.get("stories") or 1),
+        ])
+
+    duck.executemany(
+        "INSERT INTO cat_portfolio_members (portfolio_id, property_id) VALUES (?, ?)",
+        member_rows,
+    )
+    # Best-effort upsert: remove any existing rows for these imported IDs.
+    placeholders = ",".join(["?"] * len(synth_rows))
+    if synth_rows:
+        ids_only = [r[0] for r in synth_rows]
+        duck.execute(f"DELETE FROM synthetic_properties WHERE property_id IN ({placeholders})", ids_only)
+        duck.executemany(
+            """INSERT INTO synthetic_properties
+               (property_id, latitude, longitude, tiv, construction_type, occupancy, year_built, stories)
+               VALUES (?,?,?,?,?,?,?,?)""",
+            synth_rows,
+        )
+
+    duck.close()
+    return {
+        "portfolio_id": portfolio_id,
+        "name": cat_name,
+        "n_properties": len(member_rows),
+        "id_offset": IMPORT_PORTFOLIO_ID_OFFSET,
+        "id_map_sample": dict(list(id_map.items())[:10]),
+    }
+
+
+@router.get("/export/results/{portfolio_id}")
+async def export_cat_results_csv(portfolio_id: str, session_id: str | None = None):
+    duck = get_duckdb_conn()
+    sid = session_id or _latest_session_id_for_portfolio(duck, portfolio_id)
+    if not sid:
+        duck.close()
+        raise HTTPException(status_code=404, detail="No CAT sessions found for this portfolio.")
+
+    rows = duck.execute(
+        """SELECT property_id,
+                  SUM(aal) AS total_aal,
+                  SUM(CASE WHEN peril='seismic' THEN aal END) AS seismic_aal,
+                  SUM(CASE WHEN peril='flood' THEN aal END) AS flood_aal,
+                  SUM(CASE WHEN peril='wind' THEN aal END) AS wind_aal,
+                  SUM(CASE WHEN peril='seismic' THEN oep_250 END) AS seismic_oep_250,
+                  SUM(CASE WHEN peril='flood' THEN oep_250 END) AS flood_oep_250,
+                  SUM(CASE WHEN peril='wind' THEN oep_250 END) AS wind_oep_250,
+                  SUM(CASE WHEN peril='seismic' THEN oep_500 END) AS seismic_oep_500,
+                  SUM(CASE WHEN peril='flood' THEN oep_500 END) AS flood_oep_500,
+                  SUM(CASE WHEN peril='wind' THEN oep_500 END) AS wind_oep_500
+           FROM cat_results
+           WHERE portfolio_id = ? AND session_id = ?
+           GROUP BY property_id
+           ORDER BY total_aal DESC""",
+        [portfolio_id, sid],
+    ).fetchall()
+    duck.close()
+
+    header = [
+        "session_id",
+        "portfolio_id",
+        "property_id",
+        "total_aal",
+        "seismic_aal",
+        "flood_aal",
+        "wind_aal",
+        "seismic_oep_250",
+        "flood_oep_250",
+        "wind_oep_250",
+        "seismic_oep_500",
+        "flood_oep_500",
+        "wind_oep_500",
+    ]
+    out_rows = [[sid, portfolio_id, *list(r)] for r in rows]
+    return _csv_response(f"cat_results_{portfolio_id}_{sid}.csv", header, out_rows)
+
+
+@router.get("/export/ep-curve/{portfolio_id}")
+async def export_ep_curve_csv(portfolio_id: str, session_id: str | None = None):
+    duck = get_duckdb_conn()
+    sid = session_id or _latest_session_id_for_portfolio(duck, portfolio_id)
+    duck.close()
+    if not sid:
+        raise HTTPException(status_code=404, detail="No CAT sessions found for this portfolio.")
+
+    # Reuse existing EP curve computation (aggregates stochastically from members).
+    curves = await get_ep_curve(portfolio_id, n_years=5000, max_properties=100)
+
+    header = ["session_id", "portfolio_id", "peril", "curve_type", "return_period", "probability", "loss", "model_id", "model_weight"]
+    rows: list[list] = []
+    for peril, pdata in curves.items():
+        if peril == "all_perils":
+            for pt in pdata.get("oep", []):
+                rows.append([sid, portfolio_id, peril, "oep", pt.get("return_period"), pt.get("probability"), pt.get("loss"), "", ""])
+            continue
+
+        for pt in pdata.get("oep", []):
+            rows.append([sid, portfolio_id, peril, "oep", pt.get("return_period"), pt.get("probability"), pt.get("loss"), "", ""])
+        for pt in pdata.get("aep", []):
+            rows.append([sid, portfolio_id, peril, "aep", pt.get("return_period"), pt.get("probability"), pt.get("loss"), "", ""])
+        for m in pdata.get("models", []) or []:
+            for pt in m.get("oep", []) or []:
+                rows.append([sid, portfolio_id, peril, "model_oep", pt.get("return_period"), "", pt.get("loss"), m.get("model_id"), m.get("weight")])
+
+    return _csv_response(f"cat_ep_curve_{portfolio_id}_{sid}.csv", header, rows)
+
+
+@router.get("/export/event-set/{event_set_id}")
+async def export_event_set_csv(event_set_id: str):
+    duck = get_duckdb_conn()
+    meta = duck.execute(
+        "SELECT session_id, portfolio_id, property_id, peril, model_id FROM cat_event_sets WHERE event_set_id = ?",
+        [event_set_id],
+    ).fetchone()
+    if not meta:
+        duck.close()
+        raise HTTPException(status_code=404, detail="Event set not found")
+
+    events = duck.execute(
+        """SELECT year, event_index, intensity, intensity_unit, mean_dr, dr, loss
+           FROM cat_events
+           WHERE event_set_id = ?
+           ORDER BY loss DESC, year ASC, event_index ASC""",
+        [event_set_id],
+    ).fetchall()
+    duck.close()
+
+    header = [
+        "event_set_id",
+        "session_id",
+        "portfolio_id",
+        "property_id",
+        "peril",
+        "model_id",
+        "year",
+        "event_index",
+        "intensity",
+        "intensity_unit",
+        "mean_dr",
+        "dr",
+        "loss",
+    ]
+    sid, pid, prop_id, peril, model_id = meta
+    rows = [[event_set_id, sid, pid, prop_id, peril, model_id, *list(r)] for r in events]
+    return _csv_response(f"cat_event_set_{event_set_id}.csv", header, rows)
 
 
 @router.get("/event-sets")
@@ -176,7 +446,7 @@ async def get_event_set_events(
 
 
 @router.post("/run-model")
-async def run_cat_model(req: RunModelRequest):
+async def run_cat_model(req: RunModelRequest) -> RunModelResponse:
     duck = get_duckdb_conn()
     rows = duck.execute(
         """SELECT m.property_id, p.latitude, p.longitude, p.tiv,
@@ -197,9 +467,6 @@ async def run_cat_model(req: RunModelRequest):
     now_ts = datetime.now(timezone.utc).isoformat()
     pname_row = duck.execute("SELECT name FROM cat_portfolios WHERE portfolio_id = ?", [req.portfolio_id]).fetchone()
     session_name = pname_row[0] if pname_row else req.portfolio_id
-
-    # Results are keyed by portfolio_id in current schema; clear to avoid duplicates across reruns.
-    duck.execute("DELETE FROM cat_results WHERE portfolio_id = ?", [req.portfolio_id])
 
     all_results = []
     for pid, lat, lon, tiv, ctype, occ, stories in rows:
@@ -246,27 +513,32 @@ async def run_cat_model(req: RunModelRequest):
 
                 if max_annual_years > 0 and getattr(res, "annual_losses", None) is not None:
                     annual = res.annual_losses[:max_annual_years]
-                    for yi, loss_val in enumerate(annual, start=1):
-                        duck.execute(
-                            "INSERT INTO cat_annual_losses (event_set_id, year, annual_loss) VALUES (?,?,?)",
-                            [event_set_id, int(yi), float(loss_val)],
-                        )
+                    annual_rows = [(event_set_id, int(yi), float(loss_val)) for yi, loss_val in enumerate(annual, start=1)]
+                    duck.executemany(
+                        "INSERT INTO cat_annual_losses (event_set_id, year, annual_loss) VALUES (?,?,?)",
+                        annual_rows,
+                    )
 
-                for ev in (res.event_sample or []):
-                    duck.execute(
-                        """INSERT INTO cat_events
-                           (event_set_id, year, event_index, intensity, intensity_unit, mean_dr, dr, loss)
-                           VALUES (?,?,?,?,?,?,?,?)""",
-                        [
+                if res.event_sample:
+                    intensity_unit = str(getattr(res, "intensity_unit", "") or "")
+                    event_rows = [
+                        (
                             event_set_id,
                             int(ev.get("year", 0) or 0),
                             int(ev.get("event_index", 0) or 0),
                             float(ev.get("intensity", 0.0) or 0.0),
-                            str(getattr(res, "intensity_unit", "") or ""),
+                            intensity_unit,
                             float(ev.get("mean_dr", 0.0) or 0.0),
                             float(ev.get("dr", 0.0) or 0.0),
                             float(ev.get("loss", 0.0) or 0.0),
-                        ],
+                        )
+                        for ev in (res.event_sample or [])
+                    ]
+                    duck.executemany(
+                        """INSERT INTO cat_events
+                           (event_set_id, year, event_index, intensity, intensity_unit, mean_dr, dr, loss)
+                           VALUES (?,?,?,?,?,?,?,?)""",
+                        event_rows,
                     )
 
         all_results.append({
@@ -289,11 +561,11 @@ async def run_cat_model(req: RunModelRequest):
             pb = r["pricing"]["peril_breakdown"].get(peril, {})
             duck.execute(
                 """INSERT INTO cat_results
-                   (portfolio_id, property_id, peril, model_id, aal,
+                   (session_id, portfolio_id, property_id, peril, model_id, aal,
                     oep_100, oep_250, oep_500, technical_rate, loaded_rate,
                     marginal_pml)
-                   VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
-                [req.portfolio_id, r["property_id"], peril, "blended",
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
+                [session_id, req.portfolio_id, r["property_id"], peril, "blended",
                  pb.get("aal", 0),
                  pb.get("oep_100", 0), pb.get("oep_250", 0), pb.get("oep_500", 0),
                  pb.get("technical_rate_pct", 0), pb.get("loaded_rate_pct", 0), 0],
@@ -478,13 +750,17 @@ async def get_ep_curve(portfolio_id: str, n_years: int = Query(10000, ge=1000, l
 
 
 @router.get("/pricing/{portfolio_id}")
-async def get_pricing(portfolio_id: str):
+async def get_pricing(portfolio_id: str, session_id: str | None = None):
     duck = get_duckdb_conn()
+    sid = session_id or _latest_session_id_for_portfolio(duck, portfolio_id)
+    if not sid:
+        duck.close()
+        raise HTTPException(status_code=404, detail="No CAT sessions found for this portfolio.")
     rows = duck.execute(
         """SELECT property_id, peril, aal, oep_100, oep_250, oep_500,
                   technical_rate, loaded_rate
-           FROM cat_results WHERE portfolio_id = ? ORDER BY aal DESC""",
-        [portfolio_id],
+           FROM cat_results WHERE portfolio_id = ? AND session_id = ? ORDER BY aal DESC""",
+        [portfolio_id, sid],
     ).fetchall()
     cols = [d[0] for d in duck.description] if duck.description else []
     duck.close()
@@ -559,6 +835,38 @@ async def list_sessions():
     duck.close()
     return [dict(zip(cols, r)) for r in rows]
 
+@router.get("/compare")
+async def compare_sessions(session_ids: str = Query(..., description="Comma-separated session_ids (2-3 recommended)")):
+    ids = [s.strip() for s in (session_ids or "").split(",") if s.strip()]
+    if len(ids) < 2:
+        raise HTTPException(status_code=400, detail="Provide at least 2 session_ids")
+    if len(ids) > 3:
+        ids = ids[:3]
+
+    duck = get_duckdb_conn()
+    placeholders = ",".join(["?"] * len(ids))
+    sessions = duck.execute(
+        f"""SELECT session_id, portfolio_id, name, status, portfolio_tiv, portfolio_aal, portfolio_premium,
+                   n_properties, created_at, completed_at
+            FROM cat_sessions
+            WHERE session_id IN ({placeholders})
+            ORDER BY created_at DESC""",
+        ids,
+    ).fetchall()
+    scols = [d[0] for d in duck.description] if duck.description else []
+    session_rows = [dict(zip(scols, r)) for r in sessions]
+    if not session_rows:
+        duck.close()
+        raise HTTPException(status_code=404, detail="No matching sessions found")
+
+    curves: dict[str, dict] = {}
+    for s in session_rows:
+        pid = str(s["portfolio_id"])
+        curves[str(s["session_id"])] = await get_ep_curve(pid, n_years=5000, max_properties=100)
+
+    duck.close()
+    return {"sessions": session_rows, "ep_curves": curves}
+
 
 @router.get("/sessions/{session_id}")
 async def get_session(session_id: str):
@@ -573,8 +881,8 @@ async def get_session(session_id: str):
 
     results = duck.execute(
         """SELECT property_id, peril, aal, oep_100, oep_250, oep_500, technical_rate, loaded_rate
-           FROM cat_results WHERE portfolio_id = ? ORDER BY aal DESC""",
-        [pid],
+           FROM cat_results WHERE portfolio_id = ? AND session_id = ? ORDER BY aal DESC""",
+        [pid, session_id],
     ).fetchall()
     rcols = [d[0] for d in duck.description]
 
@@ -606,8 +914,8 @@ async def delete_session(session_id: str):
     if not row:
         duck.close()
         raise HTTPException(status_code=404, detail="Session not found")
-    pid = row[0]
-    duck.execute("DELETE FROM cat_results WHERE portfolio_id = ?", [pid])
+    _delete_event_sets_for_session(duck, session_id)
+    duck.execute("DELETE FROM cat_results WHERE session_id = ?", [session_id])
     duck.execute("DELETE FROM cat_sessions WHERE session_id = ?", [session_id])
     duck.close()
     return {"status": "deleted", "session_id": session_id}
