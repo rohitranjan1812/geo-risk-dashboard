@@ -268,7 +268,7 @@ export function LocationDetail({ propertyId, sessionId, onClose }: LocationDetai
                         </BarChart>
                       </ResponsiveContainer>
                       <div className="text-muted" style={{ fontSize: 11 }}>
-                        Histogram built from persisted annual losses for this event set (up to 5,000 years stored).
+                        Histogram built from persisted annual losses for this event set (up to 2,000 years stored).
                       </div>
                     </div>
                   )}

@@ -486,8 +486,10 @@ async def run_cat_model(req: RunModelRequest) -> RunModelResponse:
         blended = blend_models(raw)
         pricing = compute_technical_price(tiv, blended)
 
-        # Persist event sets (metadata + annual loss series + sampled events)
-        max_annual_years = min(int(req.n_years), 5000)
+        # Persist event sets (metadata + annual loss series + sampled events).
+        # Cap stored annual series to keep DuckDB writes bounded on large n_years × many properties.
+        # Simulation still uses full req.n_years for AAL/EP; only persisted audit series is truncated.
+        max_annual_years = min(int(req.n_years), 2000)
         for peril, models in raw.items():
             for model_id, res in models.items():
                 event_set_id = str(_uuid.uuid4())
@@ -507,7 +509,7 @@ async def run_cat_model(req: RunModelRequest) -> RunModelResponse:
                         int(pid) % (2**31),
                         json.dumps(res.params_used or {}),
                         now_ts,
-                        "annual_losses stored up to 5000 years; events are sampled (top+random)",
+                        "annual_losses stored up to 2000 years; events are sampled (top+random)",
                     ],
                 )
 

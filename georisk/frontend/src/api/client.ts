@@ -9,9 +9,19 @@ import type {
   PortfolioProperty,
 } from '../types';
 
+/** Default API client (60s) — fine for map layers, CRUD, and small queries. */
 const api = axios.create({
   baseURL: import.meta.env.VITE_API_URL || 'http://localhost:8000/api',
   timeout: 60000,
+});
+
+/**
+ * CAT simulation, EP aggregation, location drill-down, and manual scrapes can exceed 60s.
+ * Use this client so the browser does not abort while the backend is still computing.
+ */
+const apiLong = axios.create({
+  baseURL: import.meta.env.VITE_API_URL || 'http://localhost:8000/api',
+  timeout: 20 * 60 * 1000,
 });
 
 export async function fetchProperties(): Promise<Property[]> {
@@ -35,7 +45,7 @@ export async function fetchDataCatalog(): Promise<ScrapeStatus[]> {
 }
 
 export async function triggerScrape(source: string): Promise<{ source: string; status: string; records_fetched: number; message: string }> {
-  const { data } = await api.post('/data/scrape', { source });
+  const { data } = await apiLong.post('/data/scrape', { source });
   return data;
 }
 
@@ -67,7 +77,7 @@ export async function runCATForUploadedPortfolio(portfolioId: string, params: { 
   const qs = new URLSearchParams();
   if (params.n_years) qs.set('n_years', String(params.n_years));
   if (params.max_properties) qs.set('max_properties', String(params.max_properties));
-  const { data } = await api.post(`/portfolio/${encodeURIComponent(portfolioId)}/run-cat?${qs.toString()}`);
+  const { data } = await apiLong.post(`/portfolio/${encodeURIComponent(portfolioId)}/run-cat?${qs.toString()}`);
   return data;
 }
 
@@ -124,7 +134,7 @@ export async function fetchSyntheticStats(): Promise<any> {
 }
 
 export async function seedSynthetic(body: any): Promise<any> {
-  const { data } = await api.post('/synthetic/seed', body);
+  const { data } = await apiLong.post('/synthetic/seed', body);
   return data;
 }
 
@@ -144,7 +154,7 @@ export async function deleteCATSession(sessionId: string): Promise<any> {
 }
 
 export async function runCATModel(body: { portfolio_id: string; n_years?: number; max_properties?: number }): Promise<any> {
-  const { data } = await api.post('/cat/run-model', body);
+  const { data } = await apiLong.post('/cat/run-model', body);
   return data;
 }
 
@@ -152,17 +162,17 @@ export async function fetchCATEpCurve(portfolioId: string, params: { n_years?: n
   const qs = new URLSearchParams();
   if (params.n_years) qs.set('n_years', String(params.n_years));
   if (params.max_properties) qs.set('max_properties', String(params.max_properties));
-  const { data } = await api.get(`/cat/ep-curve/${encodeURIComponent(portfolioId)}?${qs.toString()}`);
+  const { data } = await apiLong.get(`/cat/ep-curve/${encodeURIComponent(portfolioId)}?${qs.toString()}`);
   return data;
 }
 
 export async function fetchCATDiversification(portfolioId: string, returnPeriod = 250): Promise<any> {
-  const { data } = await api.get(`/cat/diversification/${encodeURIComponent(portfolioId)}?return_period=${returnPeriod}`);
+  const { data } = await apiLong.get(`/cat/diversification/${encodeURIComponent(portfolioId)}?return_period=${returnPeriod}`);
   return data;
 }
 
 export async function fetchCatLocationDetail(propertyId: number, nYears = 5000): Promise<any> {
-  const { data } = await api.get(`/cat/location-detail/${propertyId}?n_years=${nYears}`);
+  const { data } = await apiLong.get(`/cat/location-detail/${propertyId}?n_years=${nYears}`);
   return data;
 }
 
@@ -194,7 +204,7 @@ export async function fetchCatEventSets(sessionId: string, propertyId?: number):
 }
 
 export async function fetchCatEventSet(eventSetId: string): Promise<any> {
-  const { data } = await api.get(`/cat/event-set/${eventSetId}`);
+  const { data } = await apiLong.get(`/cat/event-set/${eventSetId}`);
   return data;
 }
 

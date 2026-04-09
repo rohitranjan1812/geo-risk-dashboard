@@ -3,6 +3,7 @@ import { Play, Download, Shield, TrendingUp, DollarSign, BarChart3, Target } fro
 import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, Cell, Legend } from 'recharts';
 import { LoadingSpinner } from '../common/LoadingSpinner';
 import { EPCurveChart } from './EPCurveChart';
+import axios from 'axios';
 import { getCatExportEpCurveUrl, getCatExportResultsUrl } from '../../api/client';
 import { fetchCATEpCurve, fetchCATDiversification, runCATModel } from '../../api/client';
 
@@ -38,9 +39,11 @@ export function CATResults({
   const [aalMax, setAalMax] = useState('');
   const [techMin, setTechMin] = useState('');
   const [techMax, setTechMax] = useState('');
+  const [runError, setRunError] = useState<string | null>(null);
 
   const runModel = async () => {
     setRunning(true);
+    setRunError(null);
     try {
       const data = await runCATModel({
         portfolio_id: portfolioId, n_years: 10000, max_properties: Math.min(nProperties, 200),
@@ -56,6 +59,13 @@ export function CATResults({
       if (onModelComplete) onModelComplete(portfolioId);
     } catch (e) {
       console.error(e);
+      if (axios.isAxiosError(e) && e.code === 'ECONNABORTED') {
+        setRunError('Request timed out. The simulation may still be running on the server—wait and refresh, or try fewer properties / a smaller year count.');
+      } else if (axios.isAxiosError(e) && e.response?.data?.detail) {
+        setRunError(String(e.response.data.detail));
+      } else {
+        setRunError('Simulation failed. Check the browser console and backend logs.');
+      }
     } finally {
       setRunning(false);
     }
@@ -105,10 +115,12 @@ export function CATResults({
             </>
           )}
           <button className="btn btn-primary" onClick={runModel} disabled={running}>
-            {running ? <LoadingSpinner size={14} text="Running 10K-yr sim..." /> : <><Play size={14} /> Run CAT Model</>}
+            {running ? <LoadingSpinner size={14} text="Running simulation (often 2–15 min for large portfolios)..." /> : <><Play size={14} /> Run CAT Model</>}
           </button>
         </div>
       </div>
+
+      {runError && <div className="error-banner" style={{ marginBottom: 10 }}>{runError}</div>}
 
       {modelResult && (
         <>
