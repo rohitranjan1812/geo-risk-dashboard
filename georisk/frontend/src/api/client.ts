@@ -1,4 +1,4 @@
-import axios from 'axios';
+import axios, { type CancelTokenSource } from 'axios';
 import type {
   Property,
   RiskScorecard,
@@ -23,6 +23,15 @@ const apiLong = axios.create({
   baseURL: import.meta.env.VITE_API_URL || 'http://localhost:8000/api',
   timeout: 20 * 60 * 1000,
 });
+
+/**
+ * Create an AbortController-backed signal for cancellable requests.
+ * Callers can `abort()` to cancel in-flight fetches.
+ */
+export function createAbortSignal(): { signal: AbortSignal; abort: () => void } {
+  const controller = new AbortController();
+  return { signal: controller.signal, abort: () => controller.abort() };
+}
 
 export async function fetchProperties(): Promise<Property[]> {
   const { data } = await api.get('/properties/');
@@ -153,26 +162,26 @@ export async function deleteCATSession(sessionId: string): Promise<any> {
   return data;
 }
 
-export async function runCATModel(body: { portfolio_id: string; n_years?: number; max_properties?: number }): Promise<any> {
-  const { data } = await apiLong.post('/cat/run-model', body);
+export async function runCATModel(body: { portfolio_id: string; n_years?: number; max_properties?: number }, signal?: AbortSignal): Promise<any> {
+  const { data } = await apiLong.post('/cat/run-model', body, { signal });
   return data;
 }
 
-export async function fetchCATEpCurve(portfolioId: string, params: { n_years?: number; max_properties?: number } = {}): Promise<any> {
+export async function fetchCATEpCurve(portfolioId: string, params: { n_years?: number; max_properties?: number } = {}, signal?: AbortSignal): Promise<any> {
   const qs = new URLSearchParams();
   if (params.n_years) qs.set('n_years', String(params.n_years));
   if (params.max_properties) qs.set('max_properties', String(params.max_properties));
-  const { data } = await apiLong.get(`/cat/ep-curve/${encodeURIComponent(portfolioId)}?${qs.toString()}`);
+  const { data } = await apiLong.get(`/cat/ep-curve/${encodeURIComponent(portfolioId)}?${qs.toString()}`, { signal });
   return data;
 }
 
-export async function fetchCATDiversification(portfolioId: string, returnPeriod = 250): Promise<any> {
-  const { data } = await apiLong.get(`/cat/diversification/${encodeURIComponent(portfolioId)}?return_period=${returnPeriod}`);
+export async function fetchCATDiversification(portfolioId: string, returnPeriod = 250, signal?: AbortSignal): Promise<any> {
+  const { data } = await apiLong.get(`/cat/diversification/${encodeURIComponent(portfolioId)}?return_period=${returnPeriod}`, { signal });
   return data;
 }
 
-export async function fetchCatLocationDetail(propertyId: number, nYears = 5000): Promise<any> {
-  const { data } = await apiLong.get(`/cat/location-detail/${propertyId}?n_years=${nYears}`);
+export async function fetchCatLocationDetail(propertyId: number, nYears = 5000, signal?: AbortSignal): Promise<any> {
+  const { data } = await apiLong.get(`/cat/location-detail/${propertyId}?n_years=${nYears}`, { signal });
   return data;
 }
 
@@ -211,5 +220,15 @@ export async function fetchCatEventSet(eventSetId: string): Promise<any> {
 export async function fetchCatEventSetEvents(eventSetId: string, params: any): Promise<any> {
   const qs = new URLSearchParams(params || {});
   const { data } = await api.get(`/cat/event-set/${eventSetId}/events?${qs.toString()}`);
+  return data;
+}
+
+export async function postWhatIfScenario(payload: Record<string, unknown>): Promise<any> {
+  const { data } = await api.post('/scenarios/what-if', payload);
+  return data;
+}
+
+export async function fetchSessionCompare(sessionIds: string[]): Promise<any> {
+  const { data } = await api.get(`/cat/compare?session_ids=${encodeURIComponent(sessionIds.join(','))}`);
   return data;
 }

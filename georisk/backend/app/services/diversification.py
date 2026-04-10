@@ -3,7 +3,6 @@ Portfolio diversification module.
 Computes marginal PML contribution, diversification benefit, and concentration index.
 """
 import logging
-import math
 
 import numpy as np
 
@@ -37,6 +36,15 @@ def compute_diversification(
     aals_arr = np.array(aals)
 
     sum_standalone = float(np.sum(standalone_pmls_arr))
+    if sum_standalone == 0:
+        return {
+            "return_period": return_period,
+            "sum_standalone_pml": 0,
+            "portfolio_pml": 0,
+            "diversification_benefit": 0,
+            "diversification_pct": 0,
+            "properties": [],
+        }
 
     n = len(standalone_pmls)
     corr_factor = 0.3
@@ -50,14 +58,13 @@ def compute_diversification(
     diversification_pct = diversification_benefit / sum_standalone * 100 if sum_standalone > 0 else 0
 
     marginals = []
+    # O(n) marginal calculation: portfolio_without_i = sqrt(total_sum_sq - x_i^2 + corr*(total_cross - 2*x_i*(total_sum - x_i)))
+    total_sum = float(np.sum(standalone_pmls_arr))
     for i, (pid, sa_pml, aal) in enumerate(zip(property_ids, standalone_pmls, aals)):
-        remaining = np.delete(standalone_pmls_arr, i)
-        if len(remaining) > 0:
-            rem_sum_sq = float(np.sum(remaining ** 2))
-            rem_cross = float(np.sum(remaining) ** 2 - rem_sum_sq)
-            portfolio_without = float(np.sqrt(rem_sum_sq + corr_factor * rem_cross))
-        else:
-            portfolio_without = 0.0
+        rem_sum_sq = sum_sq - sa_pml * sa_pml
+        rem_sum = total_sum - sa_pml
+        rem_cross = rem_sum * rem_sum - rem_sum_sq
+        portfolio_without = float(np.sqrt(max(0, rem_sum_sq + corr_factor * rem_cross)))
 
         marginal = portfolio_pml - portfolio_without
         share_of_benefit = (sa_pml / sum_standalone * diversification_benefit) if sum_standalone > 0 else 0

@@ -17,9 +17,13 @@ export function PropertySearch({ onPropertySelect, onAddressSearch, loading }: P
 
   useEffect(() => {
     fetchProperties()
-      .then(setProperties)
+      .then((props) => {
+        setProperties(props);
+        if (props.length > 0) onPropertySelect(props[0]);
+      })
       .catch(console.error)
       .finally(() => setLoadingProps(false));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   const handleSearch = (e: React.FormEvent) => {

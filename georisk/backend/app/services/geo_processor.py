@@ -1,8 +1,8 @@
 import json
 import logging
-from pathlib import Path
+from functools import lru_cache
 
-from shapely.geometry import Point, shape, mapping
+from shapely.geometry import Point, shape
 import geopandas as gpd
 import pandas as pd
 
@@ -10,30 +10,70 @@ from app.config import settings
 
 logger = logging.getLogger(__name__)
 
+# In-memory cache for GeoJSON files — loaded once, reused across all requests.
+_geojson_cache: dict[str, dict | None] = {}
+
 
 def load_geojson(filename: str) -> dict | None:
+    if filename in _geojson_cache:
+        return _geojson_cache[filename]
+
     filepath = settings.CATALOG_DIR / filename
     if not filepath.exists():
+        _geojson_cache[filename] = None
         return None
-    with open(filepath) as f:
-        return json.load(f)
+    with open(filepath, encoding="utf-8") as f:
+        data = json.load(f)
+    _geojson_cache[filename] = data
+    return data
+
+
+def invalidate_geojson_cache(filename: str | None = None) -> None:
+    """Call after a scraper writes new data to force reload on next access."""
+    if filename:
+        _geojson_cache.pop(filename, None)
+    else:
+        _geojson_cache.clear()
+
+
+# Pre-built shapely geometries cache — avoids re-parsing on every call.
+_geometry_cache: dict[str, list[tuple]] = {}
+
+
+def _get_geometries(filename: str) -> list[tuple]:
+    """Return [(shapely_geom, properties_dict), ...] for a hazard file, cached."""
+    if filename in _geometry_cache:
+        return _geometry_cache[filename]
+
+    data = load_geojson(filename)
+    if not data:
+        return []
+
+    geom_list = []
+    for feature in data.get("features", []):
+        try:
+            geom_list.append((shape(feature["geometry"]), feature.get("properties", {})))
+        except (ValueError, TypeError):
+            continue
+
+    _geometry_cache[filename] = geom_list
+    return geom_list
 
 
 def point_in_hazard_zones(lat: float, lon: float, hazard_file: str) -> list[dict]:
-    data = load_geojson(hazard_file)
-    if not data:
+    geoms = _get_geometries(hazard_file)
+    if not geoms:
         return []
 
     point = Point(lon, lat)
     matches = []
 
-    for feature in data.get("features", []):
+    for geom, props in geoms:
         try:
-            geom = shape(feature["geometry"])
             if geom.contains(point) or geom.distance(point) < 0.01:
-                matches.append(feature["properties"])
-        except Exception as e:
-            logger.debug(f"Geometry check failed: {e}")
+                matches.append(props)
+        except (ValueError, TypeError) as e:
+            logger.debug("Geometry check failed: %s", e)
 
     return matches
 
@@ -49,6 +89,9 @@ def compute_nearby_earthquakes(lat: float, lon: float, radius_deg: float = 2.0) 
     for feature in data.get("features", []):
         try:
             coords = feature["geometry"]["coordinates"]
+            # Fast bounding-box pre-filter before expensive distance calc
+            if abs(coords[0] - lon) > radius_deg or abs(coords[1] - lat) > radius_deg:
+                continue
             eq_point = Point(coords[0], coords[1])
             dist = point.distance(eq_point)
             if dist <= radius_deg:
@@ -60,33 +103,26 @@ def compute_nearby_earthquakes(lat: float, lon: float, radius_deg: float = 2.0) 
                     "distance_deg": round(dist, 3),
                     "depth": coords[2] if len(coords) > 2 else None,
                 })
-        except Exception:
+        except (KeyError, TypeError, IndexError):
             continue
 
     return sorted(nearby, key=lambda x: x.get("distance_deg", 999))[:20]
 
 
 def batch_intersect(properties: list[dict], hazard_file: str) -> dict[int, list[dict]]:
-    data = load_geojson(hazard_file)
-    if not data:
+    geoms = _get_geometries(hazard_file)
+    if not geoms:
         return {}
-
-    hazard_geoms = []
-    for feature in data.get("features", []):
-        try:
-            hazard_geoms.append((shape(feature["geometry"]), feature["properties"]))
-        except Exception:
-            continue
 
     results = {}
     for prop in properties:
         point = Point(prop["longitude"], prop["latitude"])
         matches = []
-        for geom, props in hazard_geoms:
+        for geom, props in geoms:
             try:
                 if geom.contains(point):
                     matches.append(props)
-            except Exception:
+            except (ValueError, TypeError):
                 continue
         results[prop.get("id", 0)] = matches
 
@@ -95,7 +131,7 @@ def batch_intersect(properties: list[dict], hazard_file: str) -> dict[int, list[
 
 def properties_to_geodataframe(properties: list[dict]) -> gpd.GeoDataFrame:
     df = pd.DataFrame(properties)
-    geometry = [Point(row["longitude"], row["latitude"]) for _, row in df.iterrows()]
+    geometry = gpd.points_from_xy(df["longitude"], df["latitude"])
     return gpd.GeoDataFrame(df, geometry=geometry, crs="EPSG:4326")
 
 

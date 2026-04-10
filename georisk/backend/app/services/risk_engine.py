@@ -1,4 +1,5 @@
 import logging
+import time
 from datetime import datetime, timezone
 
 import httpx
@@ -15,6 +16,10 @@ logger = logging.getLogger(__name__)
 SEISMIC_WEIGHT = 0.35
 FLOOD_WEIGHT = 0.35
 WIND_WEIGHT = 0.30
+
+# In-memory TTL cache for USGS PGA lookups — avoids N+1 network calls.
+_pga_cache: dict[str, tuple[float, float]] = {}  # key -> (pga, timestamp)
+_PGA_CACHE_TTL = 3600  # 1 hour
 
 CONSTRUCTION_MODIFIERS = {
     "Wood Frame": 1.3,
@@ -45,8 +50,8 @@ def _fetch_usgs_pgauh(lat: float, lon: float) -> tuple[float | None, str]:
         pga = payload.get("response", {}).get("data", {}).get("pgauh")
         if isinstance(pga, (int, float)):
             return float(pga), f"USGS DesignMaps ({settings.USGS_UNIFORM_HAZARD_REFERENCE_DOCUMENT})"
-    except Exception as e:
-        logger.debug(f"USGS pgauh fetch failed: {e}")
+    except (httpx.HTTPError, KeyError, ValueError) as e:
+        logger.debug("USGS pgauh fetch failed: %s", e)
     return None, "USGS simplified zones"
 
 
@@ -59,44 +64,52 @@ def compute_seismic_score(lat: float, lon: float, construction: str = "Unknown")
     lon_key = round(lon, 4)
     cache_key = f"{lat_key},{lon_key}"
 
-    with sqlite_session() as conn:
-        row = conn.execute(
-            """
-            SELECT raw_data, source
-            FROM hazard_data
-            WHERE property_id IS NULL AND peril = 'seismic_pga' AND raw_data LIKE ?
-            ORDER BY queried_at DESC
-            LIMIT 1
-            """,
-            (f"%\"key\": \"{cache_key}\"%",),
-        ).fetchone()
-        if row:
-            try:
-                raw = row["raw_data"]
-                data = httpx.Response(200, content=raw.encode("utf-8")).json()
-                cached = data.get("pga")
-                if isinstance(cached, (int, float)):
-                    pga = float(cached)
-                    source = row["source"] or source
-            except Exception:
-                pass
+    # Check in-memory TTL cache first (fast path for N+1 scoring loops).
+    cached_entry = _pga_cache.get(cache_key)
+    if cached_entry and (time.monotonic() - cached_entry[1]) < _PGA_CACHE_TTL:
+        pga = cached_entry[0]
+        source = "USGS DesignMaps (cached)"
+
+    # Fall back to DB cache.
+    if pga is None:
+        with sqlite_session() as conn:
+            row = conn.execute(
+                """
+                SELECT raw_data, source
+                FROM hazard_data
+                WHERE property_id IS NULL AND peril = 'seismic_pga' AND raw_data LIKE ?
+                ORDER BY queried_at DESC
+                LIMIT 1
+                """,
+                (f"%\"key\": \"{cache_key}\"%",),
+            ).fetchone()
+            if row:
+                try:
+                    import json
+                    data = json.loads(row["raw_data"])
+                    cached = data.get("pga")
+                    if isinstance(cached, (int, float)):
+                        pga = float(cached)
+                        source = row["source"] or source
+                        _pga_cache[cache_key] = (pga, time.monotonic())
+                except (KeyError, ValueError, TypeError):
+                    pass
 
     if pga is None:
         fetched, fetched_source = _fetch_usgs_pgauh(lat, lon)
         if fetched is not None:
             pga = fetched
             source = fetched_source
+            _pga_cache[cache_key] = (pga, time.monotonic())
             with sqlite_session() as conn:
+                import json
                 conn.execute(
                     """
                     INSERT INTO hazard_data (property_id, peril, score, raw_data, source)
                     VALUES (NULL, 'seismic_pga', NULL, ?, ?)
                     """,
                     (
-                        httpx.Response(
-                            200,
-                            json={"key": cache_key, "latitude": lat, "longitude": lon, "pga": pga},
-                        ).text,
+                        json.dumps({"key": cache_key, "latitude": lat, "longitude": lon, "pga": pga}),
                         source,
                     ),
                 )

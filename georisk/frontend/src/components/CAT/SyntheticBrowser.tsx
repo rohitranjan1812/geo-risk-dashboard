@@ -1,4 +1,4 @@
-import { useState, useCallback } from 'react';
+import { useState, useCallback, useEffect } from 'react';
 import { Filter, ChevronLeft, ChevronRight, FolderPlus, MapPin, X } from 'lucide-react';
 import { LoadingSpinner } from '../common/LoadingSpinner';
 import { buildSyntheticPortfolio, filterSynthetic } from '../../api/client';
@@ -55,6 +55,11 @@ export function SyntheticBrowser({ bbox, onClearBbox, onPortfolioCreated, select
       setLoading(false);
     }
   }, [bbox, tivMin, tivMax, ctypes, occs, ybMin, ybMax]);
+
+  // Auto-load properties when component mounts (e.g., after seeding completes)
+  useEffect(() => {
+    doFilter(1);
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   const buildPortfolio = async () => {
     setBuilding(true);

@@ -1,7 +1,5 @@
 import sqlite3
-import json
 from contextlib import contextmanager
-from pathlib import Path
 
 import duckdb
 
@@ -30,7 +28,7 @@ CREATE TABLE IF NOT EXISTS hazard_data (
     raw_data TEXT,
     source TEXT,
     queried_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    FOREIGN KEY (property_id) REFERENCES properties(id)
+    FOREIGN KEY (property_id) REFERENCES properties(id) ON DELETE CASCADE
 );
 
 CREATE TABLE IF NOT EXISTS scrape_log (
@@ -203,7 +201,7 @@ def init_database():
     # DuckDB supports ADD COLUMN; ignore if already present.
     try:
         duck.execute("ALTER TABLE cat_results ADD COLUMN session_id TEXT")
-    except Exception:
+    except duckdb.CatalogException:
         pass
 
     duck.execute("""
@@ -291,4 +289,9 @@ def init_database():
                 [target],
             )
 
+    # Checkpoint WAL so the next startup doesn't spend time replaying it.
+    try:
+        duck.execute("CHECKPOINT")
+    except Exception:
+        pass
     duck.close()

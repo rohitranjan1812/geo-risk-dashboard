@@ -2,11 +2,19 @@
 CAT modelling API routes.
 Provides stochastic simulation, location-level HVE drill-down,
 EP curves, technical pricing, and diversification.
+
+Performance: Heavy stochastic simulations are offloaded to a ThreadPoolExecutor
+so they don't block the async event loop. Properties are processed in parallel batches.
+numpy releases the GIL during vectorised math, so threads give real parallelism and
+avoid the Windows process-spawn overhead of ProcessPoolExecutor.
 """
+import asyncio
 import json
 import logging
 import uuid as _uuid
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
+from functools import partial
 from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel
 from fastapi.responses import StreamingResponse
@@ -26,6 +34,65 @@ from app.services.diversification import compute_diversification
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
+
+IMPORT_PORTFOLIO_ID_OFFSET = 900_000_000_000
+
+# Thread pool for stochastic simulations — numpy releases the GIL so threads give real
+# parallelism while avoiding Windows process-spawn overhead / hanging.
+import os as _os
+_MAX_WORKERS = max(2, min((_os.cpu_count() or 4) * 2, 16))
+_thread_pool = ThreadPoolExecutor(max_workers=_MAX_WORKERS)
+
+
+def _simulate_single_property(
+    pid: int, lat: float, lon: float, tiv: float,
+    ctype: str, occ: str, stories: int,
+    n_years: int, collect_events: bool = True,
+    top_k_events: int = 150, random_k_events: int = 150,
+) -> dict:
+    """Run hazard estimation + stochastic sim for one property (CPU-bound, runs in process pool)."""
+    pga = estimate_pga_at_point(lat, lon)
+    flood_info = determine_flood_zone(lat, lon)
+    wind_info = estimate_hurricane_risk(lat, lon)
+
+    raw = run_stochastic_for_location(
+        lat, lon, tiv, ctype, occ, stories,
+        pga, flood_info["flood_zone"], wind_info["max_wind_prob"],
+        n_years=n_years, seed=int(pid) % (2**31),
+        collect_events=collect_events,
+        top_k_events=top_k_events, random_k_events=random_k_events,
+    )
+    blended = blend_models(raw)
+    pricing = compute_technical_price(tiv, blended)
+
+    return {
+        "property_id": int(pid),
+        "latitude": lat, "longitude": lon,
+        "tiv": tiv, "construction_type": ctype,
+        "occupancy": occ, "stories": int(stories),
+        "raw": raw, "blended": blended, "pricing": pricing,
+        "pga": pga, "flood_info": flood_info, "wind_info": wind_info,
+    }
+
+
+async def _run_simulation_batch(
+    rows: list[tuple], n_years: int,
+    collect_events: bool = True,
+    top_k_events: int = 150, random_k_events: int = 150,
+) -> list[dict]:
+    """Submit all properties to thread pool and gather results concurrently."""
+    loop = asyncio.get_running_loop()
+    futures = []
+    for pid, lat, lon, tiv, ctype, occ, stories in rows:
+        fut = loop.run_in_executor(
+            _thread_pool,
+            _simulate_single_property,
+            int(pid), float(lat), float(lon), float(tiv),
+            str(ctype), str(occ), int(stories),
+            n_years, collect_events, top_k_events, random_k_events,
+        )
+        futures.append(fut)
+    return await asyncio.gather(*futures)
 
 IMPORT_PORTFOLIO_ID_OFFSET = 900_000_000_000
 
@@ -468,29 +535,16 @@ async def run_cat_model(req: RunModelRequest) -> RunModelResponse:
     pname_row = duck.execute("SELECT name FROM cat_portfolios WHERE portfolio_id = ?", [req.portfolio_id]).fetchone()
     session_name = pname_row[0] if pname_row else req.portfolio_id
 
-    all_results = []
-    for pid, lat, lon, tiv, ctype, occ, stories in rows:
-        lat, lon, tiv = float(lat), float(lon), float(tiv)
-        pga = estimate_pga_at_point(lat, lon)
-        flood_info = determine_flood_zone(lat, lon)
-        wind_info = estimate_hurricane_risk(lat, lon)
+    # Run all property simulations in parallel using the process pool.
+    all_results = await _run_simulation_batch(
+        rows, n_years=req.n_years,
+        collect_events=True, top_k_events=150, random_k_events=150,
+    )
 
-        raw = run_stochastic_for_location(
-            lat, lon, tiv, str(ctype), str(occ), int(stories),
-            pga, flood_info["flood_zone"], wind_info["max_wind_prob"],
-            n_years=req.n_years, seed=int(pid) % (2**31),
-            collect_events=True,
-            top_k_events=150,
-            random_k_events=150,
-        )
-        blended = blend_models(raw)
-        pricing = compute_technical_price(tiv, blended)
-
-        # Persist event sets (metadata + annual loss series + sampled events).
-        # Cap stored annual series to keep DuckDB writes bounded on large n_years × many properties.
-        # Simulation still uses full req.n_years for AAL/EP; only persisted audit series is truncated.
-        max_annual_years = min(int(req.n_years), 2000)
-        for peril, models in raw.items():
+    # Persist event sets (metadata + annual loss series + sampled events).
+    max_annual_years = min(int(req.n_years), 2000)
+    for r in all_results:
+        for peril, models in r["raw"].items():
             for model_id, res in models.items():
                 event_set_id = str(_uuid.uuid4())
                 duck.execute(
@@ -499,16 +553,10 @@ async def run_cat_model(req: RunModelRequest) -> RunModelResponse:
                         n_years, seed, params_used, created_at, notes)
                        VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
                     [
-                        event_set_id,
-                        session_id,
-                        req.portfolio_id,
-                        int(pid),
-                        str(peril),
-                        str(model_id),
-                        int(res.n_years),
-                        int(pid) % (2**31),
-                        json.dumps(res.params_used or {}),
-                        now_ts,
+                        event_set_id, session_id, req.portfolio_id, r["property_id"],
+                        str(peril), str(model_id), int(res.n_years),
+                        r["property_id"] % (2**31),
+                        json.dumps(res.params_used or {}), now_ts,
                         "annual_losses stored up to 2000 years; events are sampled (top+random)",
                     ],
                 )
@@ -542,15 +590,6 @@ async def run_cat_model(req: RunModelRequest) -> RunModelResponse:
                            VALUES (?,?,?,?,?,?,?,?)""",
                         event_rows,
                     )
-
-        all_results.append({
-            "property_id": int(pid),
-            "latitude": lat, "longitude": lon,
-            "tiv": tiv, "construction_type": str(ctype),
-            "occupancy": str(occ), "stories": int(stories),
-            "blended": blended,
-            "pricing": pricing,
-        })
 
     diversification = compute_diversification(all_results, return_period=250)
 
@@ -635,9 +674,19 @@ async def location_detail(property_id: int, n_years: int = Query(10000, ge=1000,
     occ = str(prop.get("occupancy", "Residential"))
     stories = int(prop.get("stories", 1))
 
-    pga = estimate_pga_at_point(lat, lon)
-    flood_info = determine_flood_zone(lat, lon)
-    wind_info = estimate_hurricane_risk(lat, lon)
+    # Offload the heavy simulation to the thread pool so we don't block the event loop.
+    loop = asyncio.get_running_loop()
+    sim_result = await loop.run_in_executor(
+        _thread_pool,
+        _simulate_single_property,
+        property_id, lat, lon, tiv, ctype, occ, stories, n_years, False, 0, 0,
+    )
+
+    pga = sim_result["pga"]
+    flood_info = sim_result["flood_info"]
+    wind_info = sim_result["wind_info"]
+    blended = sim_result["blended"]
+    pricing = sim_result["pricing"]
 
     exposure = {
         "property_id": property_id,
@@ -671,13 +720,6 @@ async def location_detail(property_id: int, n_years: int = Query(10000, ge=1000,
         },
     }
 
-    raw = run_stochastic_for_location(
-        lat, lon, tiv, ctype, occ, stories,
-        pga, flood_info["flood_zone"], wind_info["max_wind_prob"],
-        n_years=n_years, seed=property_id % (2**31),
-    )
-    blended = blend_models(raw)
-    pricing = compute_technical_price(tiv, blended)
     ep_curves = build_ep_curve_data(blended)
 
     return {
@@ -707,44 +749,36 @@ async def get_ep_curve(portfolio_id: str, n_years: int = Query(10000, ge=1000, l
     if not rows:
         raise HTTPException(status_code=404, detail="Portfolio not found or empty")
 
-    agg_blended = {"seismic": None, "flood": None, "wind": None}
+    # Run all simulations in parallel via process pool.
+    all_results = await _run_simulation_batch(rows, n_years=n_years, collect_events=False)
 
-    for pid, lat, lon, tiv, ctype, occ, stories in rows:
-        lat, lon, tiv = float(lat), float(lon), float(tiv)
-        pga = estimate_pga_at_point(lat, lon)
-        flood_info = determine_flood_zone(lat, lon)
-        wind_info = estimate_hurricane_risk(lat, lon)
+    agg_blended: dict[str, dict] = {
+        "seismic": {"blended_aal": 0.0, "blended_oep": {}, "blended_aep": {}, "models": []},
+        "flood":   {"blended_aal": 0.0, "blended_oep": {}, "blended_aep": {}, "models": []},
+        "wind":    {"blended_aal": 0.0, "blended_oep": {}, "blended_aep": {}, "models": []},
+    }
+    first_seen: dict[str, bool] = {"seismic": False, "flood": False, "wind": False}
 
-        raw = run_stochastic_for_location(
-            lat, lon, tiv, str(ctype), str(occ), int(stories),
-            pga, flood_info["flood_zone"], wind_info["max_wind_prob"],
-            n_years=n_years, seed=int(pid) % (2**31),
-        )
-        blended = blend_models(raw)
-
+    for r in all_results:
+        blended = r["blended"]
         for peril in ["seismic", "flood", "wind"]:
             pdata = blended.get(peril, {})
-            if agg_blended[peril] is None:
-                agg_blended[peril] = {
-                    "blended_aal": pdata.get("blended_aal", 0),
-                    "blended_oep": dict(pdata.get("blended_oep", {})),
-                    "blended_aep": dict(pdata.get("blended_aep", {})),
-                    "models": pdata.get("models", []),
-                }
-            else:
-                agg_blended[peril]["blended_aal"] += pdata.get("blended_aal", 0)
-                for rp_str, val in pdata.get("blended_oep", {}).items():
-                    agg_blended[peril]["blended_oep"][rp_str] = agg_blended[peril]["blended_oep"].get(rp_str, 0) + val
-                for rp_str, val in pdata.get("blended_aep", {}).items():
-                    agg_blended[peril]["blended_aep"][rp_str] = agg_blended[peril]["blended_aep"].get(rp_str, 0) + val
+            if not first_seen[peril]:
+                first_seen[peril] = True
+                agg_blended[peril]["models"] = pdata.get("models", [])
+            agg_blended[peril]["blended_aal"] += pdata.get("blended_aal", 0)
+            for rp_str, val in pdata.get("blended_oep", {}).items():
+                agg_blended[peril]["blended_oep"][rp_str] = agg_blended[peril]["blended_oep"].get(rp_str, 0) + val
+            for rp_str, val in pdata.get("blended_aep", {}).items():
+                agg_blended[peril]["blended_aep"][rp_str] = agg_blended[peril]["blended_aep"].get(rp_str, 0) + val
 
     from app.services.stochastic import RETURN_PERIODS
     total_oep = {}
     for rp in RETURN_PERIODS:
-        total_oep[str(rp)] = round(sum(agg_blended[p]["blended_oep"].get(str(rp), 0) for p in ["seismic", "flood", "wind"] if agg_blended[p]), 2)
+        total_oep[str(rp)] = round(sum(agg_blended[p]["blended_oep"].get(str(rp), 0) for p in ["seismic", "flood", "wind"]), 2)
 
     agg_blended["all_perils"] = {
-        "total_aal": round(sum(agg_blended[p]["blended_aal"] for p in ["seismic", "flood", "wind"] if agg_blended[p]), 2),
+        "total_aal": round(sum(agg_blended[p]["blended_aal"] for p in ["seismic", "flood", "wind"]), 2),
         "total_oep": total_oep,
     }
 
@@ -804,23 +838,13 @@ async def get_diversification(portfolio_id: str, return_period: int = Query(250)
     if not rows:
         raise HTTPException(status_code=404, detail="Portfolio empty")
 
-    property_results = []
-    for pid, lat, lon, tiv, ctype, occ, stories in rows:
-        lat, lon, tiv = float(lat), float(lon), float(tiv)
-        pga = estimate_pga_at_point(lat, lon)
-        flood_info = determine_flood_zone(lat, lon)
-        wind_info = estimate_hurricane_risk(lat, lon)
+    # Run all simulations in parallel via process pool.
+    all_results = await _run_simulation_batch(rows, n_years=5000, collect_events=False)
 
-        raw = run_stochastic_for_location(
-            lat, lon, tiv, str(ctype), str(occ), int(stories),
-            pga, flood_info["flood_zone"], wind_info["max_wind_prob"],
-            n_years=5000, seed=int(pid) % (2**31),
-        )
-        blended = blend_models(raw)
-        property_results.append({
-            "property_id": int(pid), "tiv": tiv, "blended": blended,
-        })
-
+    property_results = [
+        {"property_id": r["property_id"], "tiv": r["tiv"], "blended": r["blended"]}
+        for r in all_results
+    ]
     return compute_diversification(property_results, return_period=return_period)
 
 

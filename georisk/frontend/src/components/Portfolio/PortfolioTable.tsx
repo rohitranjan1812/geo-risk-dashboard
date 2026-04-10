@@ -1,5 +1,5 @@
 import { ArrowUpDown, Download } from 'lucide-react';
-import { useState } from 'react';
+import { useState, useMemo } from 'react';
 import type { PortfolioProperty } from '../../types';
 import { getPortfolioExportUrl } from '../../api/client';
 
@@ -22,11 +22,14 @@ export function PortfolioTable({ properties, portfolioId }: PortfolioTableProps)
   const [sortKey, setSortKey] = useState<SortKey>('composite_score');
   const [sortAsc, setSortAsc] = useState(false);
 
-  const sorted = [...properties].sort((a, b) => {
-    const va = a[sortKey] ?? 0;
-    const vb = b[sortKey] ?? 0;
-    return sortAsc ? va - vb : vb - va;
-  });
+  const sorted = useMemo(() =>
+    [...properties].sort((a, b) => {
+      const va = a[sortKey] ?? 0;
+      const vb = b[sortKey] ?? 0;
+      return sortAsc ? va - vb : vb - va;
+    }),
+    [properties, sortKey, sortAsc],
+  );
 
   const handleSort = (key: SortKey) => {
     if (key === sortKey) {

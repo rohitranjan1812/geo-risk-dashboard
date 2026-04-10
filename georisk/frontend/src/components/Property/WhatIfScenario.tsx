@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import { Sliders, ArrowRight, TrendingUp, TrendingDown, Minus } from 'lucide-react';
-import axios from 'axios';
+import { postWhatIfScenario } from '../../api/client';
 
 interface WhatIfScenarioProps {
   latitude: number;
@@ -48,7 +48,7 @@ export function WhatIfScenario({ latitude, longitude, constructionType }: WhatIf
       if (floodZoneOverride) payload.flood_zone_override = floodZoneOverride;
       if (windProbOverride) payload.wind_prob_override = parseFloat(windProbOverride);
 
-      const { data } = await axios.post('http://localhost:8000/api/scenarios/what-if', payload);
+      const data = await postWhatIfScenario(payload);
       setResult(data);
     } catch (err) {
       console.error('Scenario failed:', err);

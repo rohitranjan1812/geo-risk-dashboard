@@ -1,13 +1,10 @@
+import asyncio
 import csv
 import io
-import json
 import logging
 import uuid
 from fastapi import APIRouter, HTTPException, UploadFile, File
 
-import duckdb
-
-from app.config import settings
 from app.models.database import sqlite_session, get_duckdb_conn
 from app.models.schemas import PortfolioSummary, PortfolioPropertyResult
 from app.services.risk_engine import score_property
@@ -27,36 +24,67 @@ async def upload_portfolio(file: UploadFile = File(...)):
     text = content.decode("utf-8")
     reader = csv.DictReader(io.StringIO(text))
 
+    # Normalize headers to lowercase so TIV/tiv/Tiv all work.
+    if reader.fieldnames:
+        reader.fieldnames = [f.strip().lower() for f in reader.fieldnames]
+
     portfolio_id = str(uuid.uuid4())[:8]
     properties = []
     errors = []
+
+    # Collect rows that need geocoding so we can batch them.
+    rows_needing_geocode: list[tuple[int, str]] = []  # (index_in_properties, address)
 
     for i, row in enumerate(reader):
         try:
             lat = float(row.get("latitude", 0))
             lon = float(row.get("longitude", 0))
-            if lat == 0 and lon == 0 and row.get("address"):
-                geo = await geocode_address(row["address"])
-                if geo:
-                    lat, lon = geo["latitude"], geo["longitude"]
-                else:
-                    errors.append(f"Row {i+1}: Could not geocode address '{row.get('address')}'")
-                    continue
+            needs_geocode = lat == 0 and lon == 0 and row.get("address")
 
             prop = {
                 "name": row.get("name", f"Property {i+1}"),
                 "address": row.get("address", ""),
                 "latitude": lat,
                 "longitude": lon,
-                "tiv": float(row.get("tiv", row.get("TIV", 0))),
+                "tiv": float(row.get("tiv", 0)),
                 "construction_type": row.get("construction_type", "Unknown"),
                 "occupancy": row.get("occupancy", "Unknown"),
                 "year_built": int(row["year_built"]) if row.get("year_built") else None,
                 "stories": int(row.get("stories", 1)),
+                "_needs_geocode": needs_geocode,
             }
             properties.append(prop)
+            if needs_geocode:
+                rows_needing_geocode.append((len(properties) - 1, row["address"]))
         except (ValueError, KeyError) as e:
             errors.append(f"Row {i+1}: {str(e)}")
+
+    # Batch geocode with concurrency limit.
+    if rows_needing_geocode:
+        sem = asyncio.Semaphore(10)
+
+        async def _geocode_with_limit(address: str):
+            async with sem:
+                return await geocode_address(address)
+
+        tasks = [_geocode_with_limit(addr) for _, addr in rows_needing_geocode]
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+
+        for (idx, addr), result in zip(rows_needing_geocode, results):
+            if isinstance(result, Exception):
+                errors.append(f"Row {idx+1}: Geocoding failed for '{addr}'")
+                properties[idx] = None  # type: ignore[assignment]
+            elif result:
+                properties[idx]["latitude"] = result["latitude"]
+                properties[idx]["longitude"] = result["longitude"]
+            else:
+                errors.append(f"Row {idx+1}: Could not geocode address '{addr}'")
+                properties[idx] = None  # type: ignore[assignment]
+
+    # Filter out failed geocode rows.
+    properties = [p for p in properties if p is not None]
+    for p in properties:
+        p.pop("_needs_geocode", None)
 
     with sqlite_session() as conn:
         for prop in properties:
@@ -78,7 +106,7 @@ async def upload_portfolio(file: UploadFile = File(...)):
         try:
             import h3
             h3_idx = h3.latlng_to_cell(prop["latitude"], prop["longitude"], 5)
-        except Exception:
+        except (ImportError, ValueError, OSError):
             pass
 
         duck.execute(

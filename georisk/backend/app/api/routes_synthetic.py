@@ -1,6 +1,5 @@
 import json
 import logging
-import uuid
 
 from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel
@@ -14,7 +13,7 @@ logger = logging.getLogger(__name__)
 router = APIRouter()
 
 
-def _score_one(lat: float, lon: float, construction_type: str) -> tuple[float, float, float, float, str]:
+def _score_one(lat: float, lon: float, _construction_type: str = "Unknown") -> tuple[float, float, float, float, str]:
     # Local-only scoring (no external USGS calls) so we can handle big volumes quickly.
     pga = estimate_pga_at_point(lat, lon)
     seismic = min(100.0, pga * 140.0)
@@ -121,8 +120,8 @@ async def synthetic_sample_points(limit: int = Query(2000, ge=100, le=50000)):
 async def synthetic_accumulation_hex(resolution: int = Query(5, ge=3, le=7), sample_n: int = Query(200000, ge=10000, le=1000000), top_k: int = Query(200, ge=10, le=2000)):
     try:
         import h3
-    except Exception:
-        raise HTTPException(status_code=500, detail="h3 dependency missing on backend.")
+    except ImportError as exc:
+        raise HTTPException(status_code=500, detail="h3 dependency missing on backend.") from exc
 
     duck = get_duckdb_conn()
     total = duck.execute("SELECT COUNT(*) FROM synthetic_properties").fetchone()[0]

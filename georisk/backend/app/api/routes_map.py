@@ -1,8 +1,7 @@
 import json
 import logging
-from pathlib import Path
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, HTTPException
 
 from app.config import settings
 from app.scrapers.usgs_seismic import get_seismic_hazard_zones
@@ -58,7 +57,7 @@ async def get_layer_geojson(layer_id: str):
         filepath = settings.CATALOG_DIR / "earthquakes_recent.geojson"
         if not filepath.exists():
             return {"type": "FeatureCollection", "features": []}
-        with open(filepath) as f:
+        with open(filepath, encoding="utf-8") as f:
             return json.load(f)
 
     if layer_id == "seismic_zones":

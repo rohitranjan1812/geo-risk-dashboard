@@ -65,6 +65,16 @@ export function MapContainer({
   const map = useRef<maplibregl.Map | null>(null);
   const [mapLoaded, setMapLoaded] = useState(false);
 
+  // Stable refs for callbacks to avoid stale closures in map event handlers.
+  const onPropertyClickRef = useRef(onPropertyClick);
+  onPropertyClickRef.current = onPropertyClick;
+  const onCatPropertyClickRef = useRef(onCatPropertyClick);
+  onCatPropertyClickRef.current = onCatPropertyClick;
+  const onBboxSelectRef = useRef(onBboxSelect);
+  onBboxSelectRef.current = onBboxSelect;
+  const onCatBoxSelectIdsRef = useRef(onCatBoxSelectIds);
+  onCatBoxSelectIdsRef.current = onCatBoxSelectIds;
+
   useEffect(() => {
     if (!mapContainer.current || map.current) return;
 
@@ -232,17 +242,20 @@ export function MapContainer({
         });
 
         m.on('click', 'properties-circle', (e) => {
-          if (e.features && e.features[0] && onPropertyClick) {
+          if (e.features && e.features[0] && onPropertyClickRef.current) {
             const props = e.features[0].properties;
-            onPropertyClick({
-              id: props?.id,
-              name: props?.name,
-              address: props?.address,
-              latitude: (e.features[0].geometry as GeoJSON.Point).coordinates[1],
-              longitude: (e.features[0].geometry as GeoJSON.Point).coordinates[0],
-              tiv: props?.tiv || 0,
-              construction_type: props?.construction_type || '',
-              occupancy: props?.occupancy || '',
+            if (!props) return;
+            const geom = e.features[0].geometry;
+            if (geom.type !== 'Point') return;
+            onPropertyClickRef.current({
+              id: props.id,
+              name: props.name,
+              address: props.address,
+              latitude: geom.coordinates[1],
+              longitude: geom.coordinates[0],
+              tiv: props.tiv || 0,
+              construction_type: props.construction_type || '',
+              occupancy: props.occupancy || '',
               year_built: null,
               stories: 1,
             });
@@ -279,7 +292,7 @@ export function MapContainer({
         });
       }
     }
-  }, [layers, mapLoaded, portfolioGeoJSON, addOrUpdateSource, onPropertyClick]);
+  }, [layers, mapLoaded, portfolioGeoJSON, addOrUpdateSource]);
 
   useEffect(() => {
     const m = map.current;
@@ -343,14 +356,14 @@ export function MapContainer({
         });
 
         m.on('click', 'cat-properties-circle', (e) => {
-          if (e.features?.[0] && onCatPropertyClick) {
+          if (e.features?.[0] && onCatPropertyClickRef.current) {
             const f = e.features[0];
             const id = f.properties?.id;
             const coords = (f.geometry as GeoJSON.Point).coordinates;
             if (typeof id === 'number' && Array.isArray(coords) && coords.length >= 2) {
-              onCatPropertyClick(id, [coords[0], coords[1]]);
+              onCatPropertyClickRef.current(id, [coords[0], coords[1]]);
             } else if (typeof id === 'number') {
-              onCatPropertyClick(id);
+              onCatPropertyClickRef.current(id);
             }
           }
         });
@@ -371,7 +384,7 @@ export function MapContainer({
         m.removeSource('cat-properties');
       }
     }
-  }, [catPropertiesGeoJSON, colorByField, mapLoaded, addOrUpdateSource, onCatPropertyClick]);
+  }, [catPropertiesGeoJSON, colorByField, mapLoaded, addOrUpdateSource]);
 
   useEffect(() => {
     const m = map.current;
@@ -493,16 +506,16 @@ export function MapContainer({
         m.dragPan.enable();
         const startPt = start ? m.project(start) : null;
         const curPt = m.project(ev.lngLat);
-        if (start && onBboxSelect) {
+        if (start && onBboxSelectRef.current) {
           const west = Math.min(start.lng, ev.lngLat.lng);
           const south = Math.min(start.lat, ev.lngLat.lat);
           const east = Math.max(start.lng, ev.lngLat.lng);
           const north = Math.max(start.lat, ev.lngLat.lat);
           if (Math.abs(east - west) > 0.01 && Math.abs(north - south) > 0.01) {
             const bboxLngLat: [number, number, number, number] = [west, south, east, north];
-            onBboxSelect(bboxLngLat);
+            onBboxSelectRef.current(bboxLngLat);
 
-            if (startPt && onCatBoxSelectIds && m.getLayer('cat-properties-circle')) {
+            if (startPt && onCatBoxSelectIdsRef.current && m.getLayer('cat-properties-circle')) {
               const minX = Math.min(startPt.x, curPt.x);
               const maxX = Math.max(startPt.x, curPt.x);
               const minY = Math.min(startPt.y, curPt.y);
@@ -523,7 +536,7 @@ export function MapContainer({
                   ids.push(id);
                 }
               }
-              onCatBoxSelectIds(ids, bboxLngLat);
+              onCatBoxSelectIdsRef.current(ids, bboxLngLat);
             }
           }
         }
@@ -539,7 +552,7 @@ export function MapContainer({
 
     m.on('mousedown', onMouseDown as any);
     return () => { m.off('mousedown', onMouseDown as any); };
-  }, [enableBboxSelect, onBboxSelect, onCatBoxSelectIds, mapLoaded]);
+  }, [enableBboxSelect, mapLoaded]);
 
   return <div ref={mapContainer} className="map-container" />;
 }

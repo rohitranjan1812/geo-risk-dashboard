@@ -41,7 +41,7 @@ class BaseScraper(ABC):
 
                 if response.status_code == 429:
                     retry_after = int(response.headers.get("Retry-After", 60))
-                    logger.warning(f"Rate limited on {self.SOURCE_NAME}, waiting {retry_after}s")
+                    logger.warning("Rate limited on %s, waiting %ss", self.SOURCE_NAME, retry_after)
                     await asyncio.sleep(retry_after)
                     continue
 
@@ -51,18 +51,21 @@ class BaseScraper(ABC):
 
             except httpx.HTTPStatusError as e:
                 last_exception = e
-                logger.warning(f"HTTP {e.response.status_code} on attempt {attempt + 1} for {self.SOURCE_NAME}")
+                logger.warning("HTTP %s on attempt %d for %s", e.response.status_code, attempt + 1, self.SOURCE_NAME)
             except httpx.RequestError as e:
                 last_exception = e
-                logger.warning(f"Request error on attempt {attempt + 1} for {self.SOURCE_NAME}: {e}")
+                logger.warning("Request error on attempt %d for %s: %s", attempt + 1, self.SOURCE_NAME, e)
 
         raise last_exception or Exception(f"Failed after {self.MAX_RETRIES} retries")
 
     def save_geojson(self, data: dict, filename: str) -> Path:
         filepath = settings.CATALOG_DIR / filename
         filepath.parent.mkdir(parents=True, exist_ok=True)
-        with open(filepath, "w") as f:
+        # Atomic write: write to temp file, then rename to avoid truncated files on crash.
+        tmp_path = filepath.with_suffix(".tmp")
+        with open(tmp_path, "w", encoding="utf-8") as f:
             json.dump(data, f)
+        tmp_path.replace(filepath)
         return filepath
 
     def log_scrape(self, status: str, records: int, file_path: str | None = None, error: str | None = None):
@@ -86,14 +89,14 @@ class BaseScraper(ABC):
         ...
 
     async def run(self) -> dict:
-        logger.info(f"Starting scrape: {self.SOURCE_NAME}")
+        logger.info("Starting scrape: %s", self.SOURCE_NAME)
         try:
             result = await self.scrape()
             self.log_scrape("success", result.get("records", 0), result.get("file_path"))
-            logger.info(f"Scrape complete: {self.SOURCE_NAME} - {result.get('records', 0)} records")
+            logger.info("Scrape complete: %s - %d records", self.SOURCE_NAME, result.get("records", 0))
             return result
-        except Exception as e:
-            logger.error(f"Scrape failed: {self.SOURCE_NAME} - {e}")
+        except (httpx.HTTPError, OSError, ValueError, KeyError) as e:
+            logger.error("Scrape failed: %s - %s", self.SOURCE_NAME, e)
             self.log_scrape("error", 0, error=str(e))
             return {"status": "error", "source": self.SOURCE_NAME, "error": str(e)}
         finally:

@@ -191,6 +191,9 @@ def get_hurricane_tracks_geojson() -> dict:
     return HURRICANE_TRACKS_SAMPLE
 
 
+_hurricane_coords_cache = None
+
+
 def estimate_hurricane_risk(lat: float, lon: float) -> dict:
     coast_proximity = 1.0
     gulf_atlantic = False
@@ -211,13 +214,19 @@ def estimate_hurricane_risk(lat: float, lon: float) -> dict:
     if not gulf_atlantic:
         return {"max_wind_prob": 5.0, "track_density": 0, "distance_factor": 1.0, "source": "Outside hurricane belt"}
 
+    # Cache flattened track coordinate list on first call.
+    global _hurricane_coords_cache
+    if _hurricane_coords_cache is None:
+        _hurricane_coords_cache = []
+        for feature in HURRICANE_TRACKS_SAMPLE["features"]:
+            for c in feature["geometry"]["coordinates"]:
+                _hurricane_coords_cache.append((c[0], c[1]))
+
     track_density = 0
-    for feature in HURRICANE_TRACKS_SAMPLE["features"]:
-        coords = feature["geometry"]["coordinates"]
-        for c in coords:
-            dist = math.sqrt((c[0] - lon) ** 2 + (c[1] - lat) ** 2)
-            if dist < 3.0:
-                track_density += 1
+    for cx, cy in _hurricane_coords_cache:
+        dist_sq = (cx - lon) ** 2 + (cy - lat) ** 2
+        if dist_sq < 9.0:  # 3.0^2 — skip sqrt
+            track_density += 1
 
     wind_prob = min(95, max(5, (1 - coast_proximity) * 60 + track_density * 5))
 

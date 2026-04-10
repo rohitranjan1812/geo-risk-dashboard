@@ -57,19 +57,22 @@ def setup_scheduler():
 
 
 @asynccontextmanager
-async def lifespan(app: FastAPI):
-    global scheduler
-    logger.info(f"Starting {settings.APP_NAME} v{settings.APP_VERSION}")
+async def lifespan(_app: FastAPI):
+    global scheduler  # noqa: PLW0603
+    logger.info("Starting %s v%s", settings.APP_NAME, settings.APP_VERSION)
     init_database()
     logger.info("Database initialized")
 
-    scheduler = setup_scheduler()
-    scheduler.start()
-    logger.info("Scheduler started")
+    try:
+        scheduler = setup_scheduler()
+        scheduler.start()
+        logger.info("Scheduler started")
+    except (ImportError, RuntimeError, OSError):
+        logger.exception("Failed to start scheduler")
 
     yield
 
-    if scheduler:
+    if scheduler is not None:
         scheduler.shutdown()
         logger.info("Scheduler stopped")
 

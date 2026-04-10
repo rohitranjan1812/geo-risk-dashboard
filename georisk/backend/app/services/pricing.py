@@ -2,10 +2,7 @@
 Technical pricing module.
 Converts stochastic simulation output into insurance pricing metrics.
 """
-import math
 import logging
-
-import numpy as np
 
 from app.services.stochastic import RETURN_PERIODS
 
@@ -76,6 +73,8 @@ def _estimate_cv_from_ep(aal: float, oep_250: float) -> float:
     if aal <= 0:
         return 0.0
     sigma_approx = max(oep_250 - aal, aal * 0.5)
+    # Guard against sigma=0 when OEP_250 == AAL to avoid treating portfolio as risk-free.
+    sigma_approx = max(sigma_approx, aal * 0.1)
     return sigma_approx / aal
 
 

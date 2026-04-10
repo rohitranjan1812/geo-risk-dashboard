@@ -25,11 +25,13 @@ export function LocationDetail({ propertyId, sessionId, onClose }: LocationDetai
   const [selectedEventSet, setSelectedEventSet] = useState<any>(null);
 
   useEffect(() => {
+    const controller = new AbortController();
     setLoading(true);
-    fetchCatLocationDetail(propertyId, 5000)
-      .then(res => setData(res))
-      .catch(err => console.error(err))
-      .finally(() => setLoading(false));
+    fetchCatLocationDetail(propertyId, 5000, controller.signal)
+      .then(res => { if (!controller.signal.aborted) setData(res); })
+      .catch(err => { if (!controller.signal.aborted) console.error(err); })
+      .finally(() => { if (!controller.signal.aborted) setLoading(false); });
+    return () => { controller.abort(); };
   }, [propertyId]);
 
   // Event sets (requires sessionId context)
@@ -42,19 +44,23 @@ export function LocationDetail({ propertyId, sessionId, onClose }: LocationDetai
   useEffect(() => {
     // sessionId is optional; without it we cannot scope event sets.
     if (!sessionId) return;
+    let cancelled = false;
     setEventSetLoading(true);
     fetchCatEventSets(String(sessionId), propertyId)
-      .then((rows) => setEventSets(rows || []))
-      .catch((e) => console.error(e))
-      .finally(() => setEventSetLoading(false));
+      .then((rows) => { if (!cancelled) setEventSets(rows || []); })
+      .catch((e) => { if (!cancelled) console.error(e); })
+      .finally(() => { if (!cancelled) setEventSetLoading(false); });
+    return () => { cancelled = true; };
   }, [propertyId, sessionId]);
 
   useEffect(() => {
     if (!selectedEventSetId) return;
+    let cancelled = false;
     setSelectedEventSet(null);
     fetchCatEventSet(selectedEventSetId)
-      .then((d) => setSelectedEventSet(d))
-      .catch((e) => console.error(e));
+      .then((d) => { if (!cancelled) setSelectedEventSet(d); })
+      .catch((e) => { if (!cancelled) console.error(e); });
+    return () => { cancelled = true; };
   }, [selectedEventSetId]);
 
   const eventSetsByPeril = useMemo(() => {

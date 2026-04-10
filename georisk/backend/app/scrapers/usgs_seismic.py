@@ -147,11 +147,20 @@ def get_seismic_hazard_zones() -> dict:
 def estimate_pga_at_point(lat: float, lon: float) -> float:
     from shapely.geometry import Point, shape
 
+    # Build pre-parsed geometry list once and cache it.
+    global _seismic_geom_cache
+    if "_seismic_geom_cache" not in globals() or _seismic_geom_cache is None:
+        _seismic_geom_cache = []
+        for feature in SEISMIC_HAZARD_ZONES["features"]:
+            _seismic_geom_cache.append(
+                (shape(feature["geometry"]), feature["properties"]["risk_level"])
+            )
+
     point = Point(lon, lat)
-    for feature in SEISMIC_HAZARD_ZONES["features"]:
-        polygon = shape(feature["geometry"])
+    pga_map = {5: 0.7, 4: 0.5, 3: 0.3, 2: 0.15, 1: 0.05}
+    for polygon, level in _seismic_geom_cache:
         if polygon.contains(point):
-            level = feature["properties"]["risk_level"]
-            pga_map = {5: 0.7, 4: 0.5, 3: 0.3, 2: 0.15, 1: 0.05}
             return pga_map.get(level, 0.05)
     return 0.05
+
+_seismic_geom_cache = None

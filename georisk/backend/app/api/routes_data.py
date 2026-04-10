@@ -55,19 +55,18 @@ async def trigger_scrape(request: ScrapeRequest):
 
 @router.post("/scrape-all", response_model=list[ScrapeResult])
 async def trigger_scrape_all():
-    results = []
-    for source, scraper_cls in SCRAPER_MAP.items():
+    async def _run_one(source: str, scraper_cls):
         scraper = scraper_cls()
         result = await scraper.run()
-        results.append(
-            ScrapeResult(
-                source=source,
-                status=result.get("status", "error"),
-                records_fetched=result.get("records", 0),
-                message=result.get("error", "Scrape completed successfully"),
-            )
+        return ScrapeResult(
+            source=source,
+            status=result.get("status", "error"),
+            records_fetched=result.get("records", 0),
+            message=result.get("error", "Scrape completed successfully"),
         )
-    return results
+
+    tasks = [_run_one(source, cls) for source, cls in SCRAPER_MAP.items()]
+    return await asyncio.gather(*tasks)
 
 
 @router.get("/scrape-history")

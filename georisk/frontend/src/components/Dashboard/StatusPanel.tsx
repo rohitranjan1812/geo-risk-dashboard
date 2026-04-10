@@ -90,7 +90,7 @@ export function StatusPanel() {
             <button
               className="btn btn-scrape"
               onClick={() => handleScrape(source.source)}
-              disabled={scraping === source.source}
+              disabled={scraping !== null}
             >
               {scraping === source.source ? (
                 <LoadingSpinner size={14} text="Scraping..." />

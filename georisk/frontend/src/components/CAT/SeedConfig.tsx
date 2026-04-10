@@ -20,6 +20,7 @@ export function SeedConfig({ bbox, onClearBbox, onSeeded }: SeedConfigProps) {
   const [loading, setLoading] = useState(false);
   const [stats, setStats] = useState<any>(null);
   const [loadingStats, setLoadingStats] = useState(true);
+  const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
     fetchSyntheticStats()
@@ -30,15 +31,24 @@ export function SeedConfig({ bbox, onClearBbox, onSeeded }: SeedConfigProps) {
 
   const handleSeed = async () => {
     setLoading(true);
+    setError(null);
     try {
       const body: any = { count, tiv_min: tivMin, tiv_max: tivMax };
       if (bbox) body.bbox = bbox;
       if (ctypes.length > 0) body.construction_types = ctypes;
       if (occs.length > 0) body.occupancies = occs;
       const data = await seedSynthetic(body);
-      setStats({ count: data.count });
+      // Re-fetch full stats instead of overwriting partial object
+      try {
+        const freshStats = await fetchSyntheticStats();
+        setStats(freshStats);
+      } catch {
+        setStats((prev: any) => ({ ...prev, count: data.count }));
+      }
       onSeeded();
-    } catch (e) {
+    } catch (e: any) {
+      const msg = e?.response?.data?.detail || e?.message || 'Seeding failed';
+      setError(msg);
       console.error(e);
     } finally {
       setLoading(false);
@@ -59,6 +69,8 @@ export function SeedConfig({ bbox, onClearBbox, onSeeded }: SeedConfigProps) {
           <span>Bounds: [{stats.lat_min?.toFixed(1)}, {stats.lon_min?.toFixed(1)}] to [{stats.lat_max?.toFixed(1)}, {stats.lon_max?.toFixed(1)}]</span>
         </div>
       )}
+
+      {error && <div className="error-banner">{error}</div>}
 
       {bbox && (
         <div className="bbox-badge">

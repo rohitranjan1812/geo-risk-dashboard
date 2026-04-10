@@ -20,7 +20,7 @@ async def geocode_address(address: str) -> dict | None:
 
             results = data.get("result", {}).get("addressMatches", [])
             if not results:
-                logger.warning(f"No geocoding match for: {address}")
+                logger.warning("No geocoding match for: %s", address)
                 return None
 
             match = results[0]
@@ -32,8 +32,8 @@ async def geocode_address(address: str) -> dict | None:
                 "matched_address": match["matchedAddress"],
                 "input_address": address,
             }
-    except Exception as e:
-        logger.error(f"Geocoding error for '{address}': {e}")
+    except (httpx.HTTPError, KeyError, ValueError) as e:
+        logger.error("Geocoding error for '%s': %s", address, e)
         return None
 
 

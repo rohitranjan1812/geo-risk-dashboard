@@ -2,8 +2,7 @@ import { useEffect, useMemo, useState } from 'react';
 import { BarChart3 } from 'lucide-react';
 import { LoadingSpinner } from '../common/LoadingSpinner';
 import { ResponsiveContainer, LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, Legend } from 'recharts';
-
-const API = import.meta.env.VITE_API_URL || 'http://localhost:8000/api';
+import { fetchSessionCompare } from '../../api/client';
 
 interface SessionCompareProps {
   sessionIds: string[];
@@ -21,12 +20,13 @@ export function SessionCompare({ sessionIds, onBack }: SessionCompareProps) {
       setLoading(false);
       return;
     }
+    let cancelled = false;
     setLoading(true);
-    fetch(`${API}/cat/compare?session_ids=${encodeURIComponent(ids.join(','))}`)
-      .then(r => r.json())
-      .then(setData)
-      .catch(console.error)
-      .finally(() => setLoading(false));
+    fetchSessionCompare(ids)
+      .then(d => { if (!cancelled) setData(d); })
+      .catch(e => { if (!cancelled) console.error(e); })
+      .finally(() => { if (!cancelled) setLoading(false); });
+    return () => { cancelled = true; };
   }, [sessionIds]);
 
   const chartData = useMemo(() => {

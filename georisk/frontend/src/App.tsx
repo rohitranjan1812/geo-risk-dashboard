@@ -25,8 +25,6 @@ import { fetchCATSession, fetchPortfolioAccumulation, fetchSyntheticAccumulation
 import { fetchScoredGeoJSON, fetchPortfolioGeoJSON } from './api/client';
 import './App.css';
 
-const API = import.meta.env.VITE_API_URL || 'http://localhost:8000/api';
-
 type CatStep = 'seed' | 'browse' | 'history' | 'results' | 'location' | 'compare';
 
 function App() {

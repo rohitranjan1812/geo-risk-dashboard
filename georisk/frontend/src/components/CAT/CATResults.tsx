@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useState, useMemo, memo, useCallback } from 'react';
 import { Play, Download, Shield, TrendingUp, DollarSign, BarChart3, Target } from 'lucide-react';
 import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, Cell, Legend } from 'recharts';
 import { LoadingSpinner } from '../common/LoadingSpinner';
@@ -78,6 +78,20 @@ export function CATResults({
   const parsedAalMax = aalMax ? parseFloat(aalMax) : null;
   const parsedTechMin = techMin ? parseFloat(techMin) : null;
   const parsedTechMax = techMax ? parseFloat(techMax) : null;
+
+  const filteredProperties = useMemo(() => {
+    if (!modelResult?.properties) return [];
+    return modelResult.properties
+      .filter((p: any) => {
+        if (parsedAalMin != null && p.total_aal < parsedAalMin) return false;
+        if (parsedAalMax != null && p.total_aal > parsedAalMax) return false;
+        if (parsedTechMin != null && p.technical_rate_pct < parsedTechMin) return false;
+        if (parsedTechMax != null && p.technical_rate_pct > parsedTechMax) return false;
+        if (selectionCount > 0 && !(selectedIds || []).includes(p.property_id)) return false;
+        return true;
+      })
+      .sort((a: any, b: any) => b.total_aal - a.total_aal);
+  }, [modelResult?.properties, parsedAalMin, parsedAalMax, parsedTechMin, parsedTechMax, selectionCount, selectedIds]);
 
   return (
     <div className="cat-results">
@@ -180,17 +194,7 @@ export function CATResults({
                 <table className="portfolio-table">
                   <thead><tr><th>#</th><th>Property</th><th>TIV</th><th>AAL</th><th>Tech Rate</th><th>Loaded Rate</th><th>Premium</th><th>PML-250</th></tr></thead>
                   <tbody>
-                    {modelResult.properties
-                      .sort((a: any, b: any) => b.total_aal - a.total_aal)
-                      .filter((p: any) => {
-                        if (parsedAalMin != null && p.total_aal < parsedAalMin) return false;
-                        if (parsedAalMax != null && p.total_aal > parsedAalMax) return false;
-                        if (parsedTechMin != null && p.technical_rate_pct < parsedTechMin) return false;
-                        if (parsedTechMax != null && p.technical_rate_pct > parsedTechMax) return false;
-                        if (selectionCount > 0 && !(selectedIds || []).includes(p.property_id)) return false;
-                        return true;
-                      })
-                      .map((p: any, i: number) => (
+                    {filteredProperties.map((p: any, i: number) => (
                         <tr
                           key={p.property_id}
                           onClick={() => onPropertyClick(p.property_id)}
