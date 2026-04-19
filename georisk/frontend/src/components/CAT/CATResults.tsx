@@ -1,11 +1,11 @@
-import { useState, useMemo, memo, useCallback } from 'react';
+import { useState, useMemo, memo, useCallback, useEffect } from 'react';
 import { Play, Download, Shield, TrendingUp, DollarSign, BarChart3, Target } from 'lucide-react';
 import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, Cell, Legend } from 'recharts';
 import { LoadingSpinner } from '../common/LoadingSpinner';
 import { EPCurveChart } from './EPCurveChart';
 import axios from 'axios';
 import { getCatExportEpCurveUrl, getCatExportResultsUrl } from '../../api/client';
-import { fetchCATEpCurve, fetchCATDiversification, runCATModel } from '../../api/client';
+import { runCATModel } from '../../api/client';
 
 const TIER_COLORS: Record<string, string> = { Low: '#4caf50', Moderate: '#ff9800', High: '#f44336', 'Very High': '#d32f2f', Extreme: '#880e4f' };
 
@@ -18,6 +18,10 @@ interface CATResultsProps {
   onPropertyClick: (id: number) => void;
   onModelComplete?: (portfolioId: string) => void;
   onSessionCreated?: (sessionId: string) => void;
+  /** Optional pre-computed model payload, used when loading a historical session
+   * so the UI is hydrated without firing another simulation. Accepts either a
+   * /cat/run-model response or a /cat/sessions/{id} payload. */
+  initialResult?: any | null;
 }
 
 export function CATResults({
@@ -29,6 +33,7 @@ export function CATResults({
   onPropertyClick,
   onModelComplete,
   onSessionCreated,
+  initialResult,
 }: CATResultsProps) {
   const [modelResult, setModelResult] = useState<any>(null);
   const [epData, setEpData] = useState<any>(null);
@@ -41,21 +46,54 @@ export function CATResults({
   const [techMax, setTechMax] = useState('');
   const [runError, setRunError] = useState<string | null>(null);
 
+  // Hydrate from a loaded session so the full dashboard shows immediately,
+  // without requiring the user to click "Run CAT Model" again.
+  useEffect(() => {
+    if (!initialResult) return;
+    // /cat/sessions/{id} returns { session, property_rows, ep_curves, diversification, ... }
+    // /cat/run-model returns { session_id, properties, ep_curves, diversification, ... }
+    const sessionObj = initialResult.session || null;
+    const sid = initialResult.session_id || sessionObj?.session_id || null;
+    const runModelShape = Array.isArray(initialResult.properties)
+      && initialResult.properties.length > 0
+      && initialResult.properties[0]?.total_aal !== undefined;
+    const properties = runModelShape
+      ? initialResult.properties
+      : (Array.isArray(initialResult.property_rows) ? initialResult.property_rows : []);
+
+    setModelResult({
+      session_id: sid,
+      portfolio_tiv: sessionObj?.portfolio_tiv ?? initialResult.portfolio_tiv ?? 0,
+      portfolio_aal: sessionObj?.portfolio_aal ?? initialResult.portfolio_aal ?? 0,
+      portfolio_technical_rate_pct: initialResult.portfolio_technical_rate_pct
+        ?? (sessionObj && sessionObj.portfolio_tiv ? (sessionObj.portfolio_aal / sessionObj.portfolio_tiv) * 100 : 0),
+      portfolio_premium: sessionObj?.portfolio_premium ?? initialResult.portfolio_premium ?? 0,
+      properties,
+    });
+    if (initialResult.ep_curves) setEpData(initialResult.ep_curves);
+    if (initialResult.diversification) setDivData(initialResult.diversification);
+  }, [initialResult]);
+
   const runModel = async () => {
     setRunning(true);
     setRunError(null);
+    // Clear stale results so the previous run's numbers don't linger while the
+    // next simulation is in flight — the old code would keep showing prior
+    // values under the spinner, which users interpreted as "stuck".
+    setModelResult(null);
+    setEpData(null);
+    setDivData(null);
     try {
       const data = await runCATModel({
         portfolio_id: portfolioId, n_years: 10000, max_properties: Math.min(nProperties, 200),
       });
       setModelResult(data);
       if (onSessionCreated && data?.session_id) onSessionCreated(String(data.session_id));
-      const [ep, div] = await Promise.all([
-        fetchCATEpCurve(portfolioId, { n_years: 5000, max_properties: 100 }),
-        fetchCATDiversification(portfolioId, 250),
-      ]);
-      setEpData(ep);
-      setDivData(div);
+      // EP curves and diversification now ship with the /run-model response,
+      // eliminating two additional full-simulation round-trips that previously
+      // made analysis triggers appear stuck.
+      if (data?.ep_curves) setEpData(data.ep_curves);
+      if (data?.diversification) setDivData(data.diversification);
       if (onModelComplete) onModelComplete(portfolioId);
     } catch (e) {
       console.error(e);

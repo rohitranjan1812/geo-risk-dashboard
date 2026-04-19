@@ -43,6 +43,22 @@ import os as _os
 _MAX_WORKERS = max(2, min((_os.cpu_count() or 4) * 2, 16))
 _thread_pool = ThreadPoolExecutor(max_workers=_MAX_WORKERS)
 
+# Prevent duplicate concurrent run-model invocations for the same portfolio.
+# Double-clicking "Run CAT Model" used to start two simultaneous heavy simulations,
+# contributing to the "app gets stuck" experience. A per-portfolio asyncio.Lock
+# serialises requests so only one simulation runs at a time per portfolio.
+_run_model_locks: dict[str, asyncio.Lock] = {}
+_run_model_locks_guard = asyncio.Lock()
+
+
+async def _acquire_run_model_lock(portfolio_id: str) -> asyncio.Lock:
+    async with _run_model_locks_guard:
+        lock = _run_model_locks.get(portfolio_id)
+        if lock is None:
+            lock = asyncio.Lock()
+            _run_model_locks[portfolio_id] = lock
+    return lock
+
 
 def _simulate_single_property(
     pid: int, lat: float, lon: float, tiv: float,
@@ -138,6 +154,126 @@ def _csv_response(filename: str, header: list[str], rows: list[list]) -> Streami
     )
 
 
+def _aggregate_blended_for_curves(all_results: list[dict]) -> dict:
+    """Aggregate per-property blended results into portfolio-level inputs for build_ep_curve_data.
+
+    This consolidates the aggregation logic previously duplicated between /run-model and
+    /ep-curve, so the frontend can receive EP curve data directly from /run-model without
+    a second full simulation pass.
+    """
+    from app.services.stochastic import RETURN_PERIODS as _RP
+
+    agg_blended: dict[str, dict] = {
+        "seismic": {"blended_aal": 0.0, "blended_oep": {}, "blended_aep": {}, "models": []},
+        "flood":   {"blended_aal": 0.0, "blended_oep": {}, "blended_aep": {}, "models": []},
+        "wind":    {"blended_aal": 0.0, "blended_oep": {}, "blended_aep": {}, "models": []},
+    }
+    first_seen: dict[str, bool] = {"seismic": False, "flood": False, "wind": False}
+
+    for r in all_results:
+        blended = r.get("blended", {})
+        for peril in ("seismic", "flood", "wind"):
+            pdata = blended.get(peril, {})
+            if not first_seen[peril]:
+                first_seen[peril] = True
+                agg_blended[peril]["models"] = pdata.get("models", [])
+            agg_blended[peril]["blended_aal"] += pdata.get("blended_aal", 0)
+            for rp_str, val in pdata.get("blended_oep", {}).items():
+                agg_blended[peril]["blended_oep"][rp_str] = agg_blended[peril]["blended_oep"].get(rp_str, 0) + val
+            for rp_str, val in pdata.get("blended_aep", {}).items():
+                agg_blended[peril]["blended_aep"][rp_str] = agg_blended[peril]["blended_aep"].get(rp_str, 0) + val
+
+    total_oep = {}
+    for rp in _RP:
+        total_oep[str(rp)] = round(
+            sum(agg_blended[p]["blended_oep"].get(str(rp), 0) for p in ("seismic", "flood", "wind")),
+            2,
+        )
+    agg_blended["all_perils"] = {
+        "total_aal": round(sum(agg_blended[p]["blended_aal"] for p in ("seismic", "flood", "wind")), 2),
+        "total_oep": total_oep,
+    }
+    return agg_blended
+
+
+def _ep_curves_from_session(duck, portfolio_id: str, session_id: str) -> dict | None:
+    """Reconstruct EP curves and diversification inputs from persisted cat_results.
+
+    This avoids re-running the full stochastic simulation when a session already exists.
+    Limitations (vs. live simulation): per-model curves are not persisted, so the
+    `models` list is empty; AEP is not persisted, so blended_aep is empty; only the
+    return periods that were stored (100, 250, 500) are populated — other RP points
+    fall back to 0. For typical UI use (OEP/AEP chart + top-line PML metrics) this is
+    sufficient, and it is many orders of magnitude cheaper than re-simulating.
+    """
+    rows = duck.execute(
+        """SELECT property_id, peril, aal, oep_100, oep_250, oep_500
+           FROM cat_results
+           WHERE portfolio_id = ? AND session_id = ?""",
+        [portfolio_id, session_id],
+    ).fetchall()
+    if not rows:
+        return None
+
+    agg: dict[str, dict] = {
+        "seismic": {"blended_aal": 0.0, "blended_oep": {}, "blended_aep": {}, "models": []},
+        "flood":   {"blended_aal": 0.0, "blended_oep": {}, "blended_aep": {}, "models": []},
+        "wind":    {"blended_aal": 0.0, "blended_oep": {}, "blended_aep": {}, "models": []},
+    }
+    for _pid, peril, aal, oep_100, oep_250, oep_500 in rows:
+        peril = str(peril)
+        if peril not in agg:
+            continue
+        agg[peril]["blended_aal"] += float(aal or 0)
+        agg[peril]["blended_oep"]["100"] = agg[peril]["blended_oep"].get("100", 0) + float(oep_100 or 0)
+        agg[peril]["blended_oep"]["250"] = agg[peril]["blended_oep"].get("250", 0) + float(oep_250 or 0)
+        agg[peril]["blended_oep"]["500"] = agg[peril]["blended_oep"].get("500", 0) + float(oep_500 or 0)
+
+    from app.services.stochastic import RETURN_PERIODS as _RP
+    total_oep = {}
+    for rp in _RP:
+        total_oep[str(rp)] = round(
+            sum(agg[p]["blended_oep"].get(str(rp), 0) for p in ("seismic", "flood", "wind")),
+            2,
+        )
+    agg["all_perils"] = {
+        "total_aal": round(sum(agg[p]["blended_aal"] for p in ("seismic", "flood", "wind")), 2),
+        "total_oep": total_oep,
+    }
+    return agg
+
+
+def _property_results_from_session(duck, portfolio_id: str, session_id: str) -> list[dict]:
+    """Build the `property_results` structure expected by compute_diversification
+    from persisted cat_results, avoiding a second simulation pass."""
+    rows = duck.execute(
+        """SELECT r.property_id, r.peril, r.aal, r.oep_100, r.oep_250, r.oep_500, p.tiv
+           FROM cat_results r
+           JOIN synthetic_properties p ON r.property_id = p.property_id
+           WHERE r.portfolio_id = ? AND r.session_id = ?""",
+        [portfolio_id, session_id],
+    ).fetchall()
+    if not rows:
+        return []
+
+    by_pid: dict[int, dict] = {}
+    for pid, peril, aal, oep_100, oep_250, oep_500, tiv in rows:
+        pid = int(pid)
+        if pid not in by_pid:
+            by_pid[pid] = {"property_id": pid, "tiv": float(tiv or 0), "blended": {}}
+        by_pid[pid]["blended"][str(peril)] = {
+            "blended_aal": float(aal or 0),
+            "blended_oep": {
+                "100": float(oep_100 or 0),
+                "250": float(oep_250 or 0),
+                "500": float(oep_500 or 0),
+            },
+            "blended_aep": {},
+            "models": [],
+        }
+    return list(by_pid.values())
+
+
 class RunModelRequest(BaseModel):
     portfolio_id: str
     n_years: int = 10000
@@ -154,6 +290,7 @@ class RunModelResponse(BaseModel):
     portfolio_technical_rate_pct: float
     portfolio_premium: float
     diversification: dict
+    ep_curves: dict
     properties: list[dict]
 
 
@@ -487,8 +624,8 @@ async def get_event_set_events(
             FROM cat_events
             WHERE {where}
             ORDER BY loss DESC, year ASC, event_index ASC
-            LIMIT {page_size} OFFSET {offset}""",
-        params,
+            LIMIT ? OFFSET ?""",
+        params + [int(page_size), int(offset)],
     ).fetchall()
     duck.close()
     return {
@@ -514,6 +651,12 @@ async def get_event_set_events(
 
 @router.post("/run-model")
 async def run_cat_model(req: RunModelRequest) -> RunModelResponse:
+    lock = await _acquire_run_model_lock(req.portfolio_id)
+    async with lock:
+        return await _run_cat_model_impl(req)
+
+
+async def _run_cat_model_impl(req: RunModelRequest) -> dict:
     duck = get_duckdb_conn()
     rows = duck.execute(
         """SELECT m.property_id, p.latitude, p.longitude, p.tiv,
@@ -593,6 +736,13 @@ async def run_cat_model(req: RunModelRequest) -> RunModelResponse:
 
     diversification = compute_diversification(all_results, return_period=250)
 
+    # Build EP curve data up-front so the frontend does not need to issue a
+    # second full-simulation request just to render the EP chart. This was a
+    # major source of "app gets stuck" user reports: /run-model + /ep-curve +
+    # /diversification used to run three independent stochastic simulations
+    # back-to-back.
+    ep_curves = build_ep_curve_data(_aggregate_blended_for_curves(all_results))
+
     portfolio_aal = sum(r["pricing"]["total_aal"] for r in all_results)
     portfolio_tiv = sum(r["tiv"] for r in all_results)
     portfolio_premium = sum(r["pricing"]["total_premium"] for r in all_results)
@@ -632,6 +782,7 @@ async def run_cat_model(req: RunModelRequest) -> RunModelResponse:
         "portfolio_technical_rate_pct": round(portfolio_aal / portfolio_tiv * 100, 4) if portfolio_tiv > 0 else 0,
         "portfolio_premium": round(portfolio_premium, 2),
         "diversification": diversification,
+        "ep_curves": ep_curves,
         "properties": [
             {
                 "property_id": r["property_id"],
@@ -733,8 +884,25 @@ async def location_detail(property_id: int, n_years: int = Query(10000, ge=1000,
 
 
 @router.get("/ep-curve/{portfolio_id}")
-async def get_ep_curve(portfolio_id: str, n_years: int = Query(10000, ge=1000, le=50000), max_properties: int = Query(100, ge=10, le=500)):
+async def get_ep_curve(
+    portfolio_id: str,
+    n_years: int = Query(10000, ge=1000, le=50000),
+    max_properties: int = Query(100, ge=10, le=500),
+    session_id: str | None = None,
+):
+    # Fast path: if the caller identifies a session (or one already exists for this
+    # portfolio), serve EP curves from persisted cat_results rather than re-running
+    # the full stochastic simulation. This eliminates the 2nd/3rd "stuck during
+    # analysis" round-trip that the frontend used to incur after /run-model.
     duck = get_duckdb_conn()
+    sid = session_id or _latest_session_id_for_portfolio(duck, portfolio_id)
+    if sid:
+        agg = _ep_curves_from_session(duck, portfolio_id, sid)
+        duck.close()
+        if agg is not None:
+            return build_ep_curve_data(agg)
+        duck = get_duckdb_conn()
+
     rows = duck.execute(
         """SELECT m.property_id, p.latitude, p.longitude, p.tiv,
                   p.construction_type, p.occupancy, p.stories
@@ -752,36 +920,7 @@ async def get_ep_curve(portfolio_id: str, n_years: int = Query(10000, ge=1000, l
     # Run all simulations in parallel via process pool.
     all_results = await _run_simulation_batch(rows, n_years=n_years, collect_events=False)
 
-    agg_blended: dict[str, dict] = {
-        "seismic": {"blended_aal": 0.0, "blended_oep": {}, "blended_aep": {}, "models": []},
-        "flood":   {"blended_aal": 0.0, "blended_oep": {}, "blended_aep": {}, "models": []},
-        "wind":    {"blended_aal": 0.0, "blended_oep": {}, "blended_aep": {}, "models": []},
-    }
-    first_seen: dict[str, bool] = {"seismic": False, "flood": False, "wind": False}
-
-    for r in all_results:
-        blended = r["blended"]
-        for peril in ["seismic", "flood", "wind"]:
-            pdata = blended.get(peril, {})
-            if not first_seen[peril]:
-                first_seen[peril] = True
-                agg_blended[peril]["models"] = pdata.get("models", [])
-            agg_blended[peril]["blended_aal"] += pdata.get("blended_aal", 0)
-            for rp_str, val in pdata.get("blended_oep", {}).items():
-                agg_blended[peril]["blended_oep"][rp_str] = agg_blended[peril]["blended_oep"].get(rp_str, 0) + val
-            for rp_str, val in pdata.get("blended_aep", {}).items():
-                agg_blended[peril]["blended_aep"][rp_str] = agg_blended[peril]["blended_aep"].get(rp_str, 0) + val
-
-    from app.services.stochastic import RETURN_PERIODS
-    total_oep = {}
-    for rp in RETURN_PERIODS:
-        total_oep[str(rp)] = round(sum(agg_blended[p]["blended_oep"].get(str(rp), 0) for p in ["seismic", "flood", "wind"]), 2)
-
-    agg_blended["all_perils"] = {
-        "total_aal": round(sum(agg_blended[p]["blended_aal"] for p in ["seismic", "flood", "wind"]), 2),
-        "total_oep": total_oep,
-    }
-
+    agg_blended = _aggregate_blended_for_curves(all_results)
     return build_ep_curve_data(agg_blended)
 
 
@@ -822,8 +961,21 @@ async def get_pricing(portfolio_id: str, session_id: str | None = None):
 
 
 @router.get("/diversification/{portfolio_id}")
-async def get_diversification(portfolio_id: str, return_period: int = Query(250)):
+async def get_diversification(
+    portfolio_id: str,
+    return_period: int = Query(250),
+    session_id: str | None = None,
+):
+    # Fast path: reuse persisted cat_results whenever a session exists.
     duck = get_duckdb_conn()
+    sid = session_id or _latest_session_id_for_portfolio(duck, portfolio_id)
+    if sid:
+        property_results = _property_results_from_session(duck, portfolio_id, sid)
+        duck.close()
+        if property_results:
+            return compute_diversification(property_results, return_period=return_period)
+        duck = get_duckdb_conn()
+
     rows = duck.execute(
         """SELECT m.property_id, p.latitude, p.longitude, p.tiv,
                   p.construction_type, p.occupancy, p.stories
@@ -887,8 +1039,20 @@ async def compare_sessions(session_ids: str = Query(..., description="Comma-sepa
 
     curves: dict[str, dict] = {}
     for s in session_rows:
+        sid = str(s["session_id"])
         pid = str(s["portfolio_id"])
-        curves[str(s["session_id"])] = await get_ep_curve(pid, n_years=5000, max_properties=100)
+        agg = _ep_curves_from_session(duck, pid, sid)
+        if agg is not None:
+            curves[sid] = build_ep_curve_data(agg)
+        else:
+            # Fallback only if persisted data is somehow missing — still avoids
+            # triggering a fresh stochastic simulation inside a comparison view.
+            logger.warning(
+                "No persisted cat_results for session_id=%s (portfolio_id=%s); "
+                "returning empty EP curve for this session in /compare.",
+                sid, pid,
+            )
+            curves[sid] = {}
 
     duck.close()
     return {"sessions": session_rows, "ep_curves": curves}
@@ -920,6 +1084,57 @@ async def get_session(session_id: str):
            ORDER BY p.tiv DESC LIMIT 500""",
         [pid],
     ).fetchall()
+
+    # Derive EP curves, diversification, and a flat per-property pricing view
+    # from persisted cat_results so that loading a historical session fully
+    # re-hydrates the UI without requiring a fresh stochastic simulation.
+    ep_agg = _ep_curves_from_session(duck, pid, session_id)
+    ep_curves = build_ep_curve_data(ep_agg) if ep_agg is not None else None
+
+    property_results_struct = _property_results_from_session(duck, pid, session_id)
+    diversification = compute_diversification(property_results_struct, return_period=250) if property_results_struct else None
+
+    # Flat per-property rows matching /run-model's `properties` shape for the UI.
+    tiv_by_pid = {int(p[0]): float(p[3]) for p in props}
+    per_pid: dict[int, dict] = {}
+    for r in results:
+        d = dict(zip(rcols, r))
+        pid_i = int(d["property_id"])
+        if pid_i not in per_pid:
+            per_pid[pid_i] = {
+                "property_id": pid_i,
+                "tiv": float(tiv_by_pid.get(pid_i, 0.0)),
+                "total_aal": 0.0,
+                "total_premium": 0.0,
+                "peril_breakdown": {},
+                "pml_250": 0.0,
+            }
+        per_pid[pid_i]["total_aal"] += float(d.get("aal") or 0)
+        per_pid[pid_i]["peril_breakdown"][str(d["peril"])] = {
+            "aal": float(d.get("aal") or 0),
+            "oep_250": float(d.get("oep_250") or 0),
+            "technical_rate_pct": float(d.get("technical_rate") or 0),
+            "loaded_rate_pct": float(d.get("loaded_rate") or 0),
+        }
+        per_pid[pid_i]["pml_250"] += float(d.get("oep_250") or 0)
+
+    property_rows = []
+    for row in per_pid.values():
+        tiv = row["tiv"]
+        tech_rate = (row["total_aal"] / tiv * 100) if tiv > 0 else 0.0
+        loaded_rate = sum(pb.get("loaded_rate_pct", 0) for pb in row["peril_breakdown"].values())
+        premium = loaded_rate / 100.0 * tiv
+        property_rows.append({
+            "property_id": row["property_id"],
+            "tiv": tiv,
+            "total_aal": round(row["total_aal"], 2),
+            "technical_rate_pct": round(tech_rate, 4),
+            "total_loaded_rate_pct": round(loaded_rate, 4),
+            "total_premium": round(premium, 2),
+            "pml_250": round(row["pml_250"], 2),
+        })
+    property_rows.sort(key=lambda r: r["total_aal"], reverse=True)
+
     duck.close()
 
     return {
@@ -930,6 +1145,9 @@ async def get_session(session_id: str):
              "tiv": float(p[3]), "construction_type": str(p[4]), "occupancy": str(p[5])}
             for p in props
         ],
+        "property_rows": property_rows,
+        "ep_curves": ep_curves,
+        "diversification": diversification,
     }
 
 

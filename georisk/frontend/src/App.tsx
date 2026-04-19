@@ -147,6 +147,8 @@ function App() {
 
   const handlePortfolioCreated = useCallback((id: string, name: string, count: number) => {
     setCatPortfolio({ id, name, count });
+    setCatModelResult(null);
+    setCatActiveSessionId(null);
     loadPortfolioOnMap(id);
     setCatStep('results');
   }, [loadPortfolioOnMap]);
@@ -287,6 +289,7 @@ function App() {
                     nProperties={catPortfolio.count}
                     selectedPropertyId={selectedCatPropertyId}
                     selectedIds={selectedCatIds}
+                    initialResult={catModelResult}
                     onPropertyClick={(id) => {
                       selectCatProperty(id);
                       setCatLocationId(id);
@@ -297,7 +300,7 @@ function App() {
                   />
                   <div className="cat-nav-buttons">
                     <button className="btn btn-outline btn-sm" onClick={() => setCatStep('history')}>Session History</button>
-                    <button className="btn btn-outline btn-sm" onClick={() => { setCatPortfolio(null); setCatPropertiesGeoJSON(null); setAalHeatmapGeoJSON(null); setCatActiveSessionId(null); setCatStep('browse'); }}>New Portfolio</button>
+                    <button className="btn btn-outline btn-sm" onClick={() => { setCatPortfolio(null); setCatPropertiesGeoJSON(null); setAalHeatmapGeoJSON(null); setCatActiveSessionId(null); setCatModelResult(null); setCatStep('browse'); }}>New Portfolio</button>
                   </div>
                 </>
               ) : catStep === 'seed' ? (
