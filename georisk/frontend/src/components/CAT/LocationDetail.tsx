@@ -100,7 +100,7 @@ export function LocationDetail({ propertyId, sessionId, onClose }: LocationDetai
   if (!data) return <div className="error-banner">Failed to load location detail</div>;
 
   const { exposure, hazard, vulnerability, loss, ep_curves } = data;
-  const totalScore = loss.technical_rate_pct || 0;
+  const totalScore = loss?.technical_rate_pct || 0;
   const tier = totalScore < 0.5 ? 'Low' : totalScore < 1.5 ? 'Moderate' : totalScore < 3 ? 'High' : totalScore < 5 ? 'Very High' : 'Extreme';
 
   return (
@@ -124,13 +124,15 @@ export function LocationDetail({ propertyId, sessionId, onClose }: LocationDetai
         </div>
 
         {(['seismic', 'flood', 'wind'] as const).map(peril => {
-          const h = hazard[peril];
-          const v = vulnerability[peril];
-          const pb = loss.peril_breakdown?.[peril];
+          const h = hazard?.[peril];
+          const v = vulnerability?.[peril];
+          const pb = loss?.peril_breakdown?.[peril];
           const icon = peril === 'seismic' ? Mountain : peril === 'flood' ? Droplets : Wind;
           const Icon = icon;
           const epData = ep_curves?.[peril];
           const perilColor = peril === 'seismic' ? '#f44336' : peril === 'flood' ? '#2196f3' : '#ff9800';
+
+          if (!h || !v) return null;
 
           return (
             <div key={peril} className="hve-card" style={{ borderLeftColor: perilColor }}>
@@ -154,11 +156,11 @@ export function LocationDetail({ propertyId, sessionId, onClose }: LocationDetai
               <div className="hve-sub">
                 <h4>Vulnerability (MDR)</h4>
                 <div className="hve-grid">
-                  <div><span className="hve-label">Mean DR</span><span className="hve-value">{(v.mdr.mean_dr * 100).toFixed(2)}%</span></div>
-                  <div><span className="hve-label">Sigma</span><span className="hve-value">{(v.mdr.sigma_dr * 100).toFixed(2)}%</span></div>
+                  <div><span className="hve-label">Mean DR</span><span className="hve-value">{((v.mdr?.mean_dr ?? 0) * 100).toFixed(2)}%</span></div>
+                  <div><span className="hve-label">Sigma</span><span className="hve-value">{((v.mdr?.sigma_dr ?? 0) * 100).toFixed(2)}%</span></div>
                 </div>
-                <MDRChart curve={v.curve} operatingPoint={{ intensity: v.mdr.intensity, mean_dr: v.mdr.mean_dr }}
-                  peril={peril} intensityUnit={v.mdr.intensity_unit} />
+                {v.mdr && <MDRChart curve={v.curve} operatingPoint={{ intensity: v.mdr.intensity, mean_dr: v.mdr.mean_dr }}
+                  peril={peril} intensityUnit={v.mdr.intensity_unit} />}
               </div>
 
               <div className="hve-sub">
@@ -181,21 +183,21 @@ export function LocationDetail({ propertyId, sessionId, onClose }: LocationDetai
           <h3><Shield size={16} /> Composite</h3>
           <div className="composite-banner" style={{ borderColor: TIER_COLORS[tier] }}>
             <div className="composite-big">
-              <span className="composite-rate" style={{ color: TIER_COLORS[tier] }}>{loss.technical_rate_pct?.toFixed(3)}%</span>
+              <span className="composite-rate" style={{ color: TIER_COLORS[tier] }}>{loss?.technical_rate_pct?.toFixed(3)}%</span>
               <span className="composite-label">Technical Rate</span>
             </div>
             <div className="composite-big">
-              <span className="composite-rate">{loss.total_loaded_rate_pct?.toFixed(3)}%</span>
+              <span className="composite-rate">{loss?.total_loaded_rate_pct?.toFixed(3)}%</span>
               <span className="composite-label">Loaded Rate</span>
             </div>
             <div className="composite-big">
-              <span className="composite-rate">${loss.total_premium?.toLocaleString()}</span>
+              <span className="composite-rate">${loss?.total_premium?.toLocaleString()}</span>
               <span className="composite-label">Total Premium</span>
             </div>
           </div>
           <div className="hve-grid" style={{ marginTop: 8 }}>
-            <div><span className="hve-label">Total AAL</span><span className="hve-value">${loss.total_aal?.toLocaleString()}</span></div>
-            <div><span className="hve-label">Risk Load</span><span className="hve-value">{(loss.total_risk_load_factor * 100)?.toFixed(1)}%</span></div>
+            <div><span className="hve-label">Total AAL</span><span className="hve-value">${loss?.total_aal?.toLocaleString()}</span></div>
+            <div><span className="hve-label">Risk Load</span><span className="hve-value">{((loss?.total_risk_load_factor ?? 0) * 100)?.toFixed(1)}%</span></div>
             <div><span className="hve-label">PML-250</span><span className="hve-value">${loss.pml?.['250']?.toLocaleString()}</span></div>
             <div><span className="hve-label">PML-500</span><span className="hve-value">${loss.pml?.['500']?.toLocaleString()}</span></div>
           </div>

@@ -535,92 +535,94 @@ async def run_cat_model(req: RunModelRequest) -> RunModelResponse:
     pname_row = duck.execute("SELECT name FROM cat_portfolios WHERE portfolio_id = ?", [req.portfolio_id]).fetchone()
     session_name = pname_row[0] if pname_row else req.portfolio_id
 
-    # Run all property simulations in parallel using the process pool.
+    # Run all property simulations in parallel using the thread pool.
     all_results = await _run_simulation_batch(
         rows, n_years=req.n_years,
         collect_events=True, top_k_events=150, random_k_events=150,
     )
 
-    # Persist event sets (metadata + annual loss series + sampled events).
-    max_annual_years = min(int(req.n_years), 2000)
-    for r in all_results:
-        for peril, models in r["raw"].items():
-            for model_id, res in models.items():
-                event_set_id = str(_uuid.uuid4())
-                duck.execute(
-                    """INSERT INTO cat_event_sets
-                       (event_set_id, session_id, portfolio_id, property_id, peril, model_id,
-                        n_years, seed, params_used, created_at, notes)
-                       VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
-                    [
-                        event_set_id, session_id, req.portfolio_id, r["property_id"],
-                        str(peril), str(model_id), int(res.n_years),
-                        r["property_id"] % (2**31),
-                        json.dumps(res.params_used or {}), now_ts,
-                        "annual_losses stored up to 2000 years; events are sampled (top+random)",
-                    ],
-                )
-
-                if max_annual_years > 0 and getattr(res, "annual_losses", None) is not None:
-                    annual = res.annual_losses[:max_annual_years]
-                    annual_rows = [(event_set_id, int(yi), float(loss_val)) for yi, loss_val in enumerate(annual, start=1)]
-                    duck.executemany(
-                        "INSERT INTO cat_annual_losses (event_set_id, year, annual_loss) VALUES (?,?,?)",
-                        annual_rows,
+    try:
+        # Persist event sets (metadata + annual loss series + sampled events).
+        max_annual_years = min(int(req.n_years), 2000)
+        for r in all_results:
+            for peril, models in r["raw"].items():
+                for model_id, res in models.items():
+                    event_set_id = str(_uuid.uuid4())
+                    duck.execute(
+                        """INSERT INTO cat_event_sets
+                           (event_set_id, session_id, portfolio_id, property_id, peril, model_id,
+                            n_years, seed, params_used, created_at, notes)
+                           VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
+                        [
+                            event_set_id, session_id, req.portfolio_id, r["property_id"],
+                            str(peril), str(model_id), int(res.n_years),
+                            r["property_id"] % (2**31),
+                            json.dumps(res.params_used or {}), now_ts,
+                            "annual_losses stored up to 2000 years; events are sampled (top+random)",
+                        ],
                     )
 
-                if res.event_sample:
-                    intensity_unit = str(getattr(res, "intensity_unit", "") or "")
-                    event_rows = [
-                        (
-                            event_set_id,
-                            int(ev.get("year", 0) or 0),
-                            int(ev.get("event_index", 0) or 0),
-                            float(ev.get("intensity", 0.0) or 0.0),
-                            intensity_unit,
-                            float(ev.get("mean_dr", 0.0) or 0.0),
-                            float(ev.get("dr", 0.0) or 0.0),
-                            float(ev.get("loss", 0.0) or 0.0),
+                    if max_annual_years > 0 and getattr(res, "annual_losses", None) is not None:
+                        annual = res.annual_losses[:max_annual_years]
+                        annual_rows = [(event_set_id, int(yi), float(loss_val)) for yi, loss_val in enumerate(annual, start=1)]
+                        duck.executemany(
+                            "INSERT INTO cat_annual_losses (event_set_id, year, annual_loss) VALUES (?,?,?)",
+                            annual_rows,
                         )
-                        for ev in (res.event_sample or [])
-                    ]
-                    duck.executemany(
-                        """INSERT INTO cat_events
-                           (event_set_id, year, event_index, intensity, intensity_unit, mean_dr, dr, loss)
-                           VALUES (?,?,?,?,?,?,?,?)""",
-                        event_rows,
-                    )
 
-    diversification = compute_diversification(all_results, return_period=250)
+                    if res.event_sample:
+                        intensity_unit = str(getattr(res, "intensity_unit", "") or "")
+                        event_rows = [
+                            (
+                                event_set_id,
+                                int(ev.get("year", 0) or 0),
+                                int(ev.get("event_index", 0) or 0),
+                                float(ev.get("intensity", 0.0) or 0.0),
+                                intensity_unit,
+                                float(ev.get("mean_dr", 0.0) or 0.0),
+                                float(ev.get("dr", 0.0) or 0.0),
+                                float(ev.get("loss", 0.0) or 0.0),
+                            )
+                            for ev in (res.event_sample or [])
+                        ]
+                        duck.executemany(
+                            """INSERT INTO cat_events
+                               (event_set_id, year, event_index, intensity, intensity_unit, mean_dr, dr, loss)
+                               VALUES (?,?,?,?,?,?,?,?)""",
+                            event_rows,
+                        )
 
-    portfolio_aal = sum(r["pricing"]["total_aal"] for r in all_results)
-    portfolio_tiv = sum(r["tiv"] for r in all_results)
-    portfolio_premium = sum(r["pricing"]["total_premium"] for r in all_results)
+        diversification = compute_diversification(all_results, return_period=250)
 
-    for r in all_results:
-        for peril in ["seismic", "flood", "wind"]:
-            pb = r["pricing"]["peril_breakdown"].get(peril, {})
-            duck.execute(
-                """INSERT INTO cat_results
-                   (session_id, portfolio_id, property_id, peril, model_id, aal,
-                    oep_100, oep_250, oep_500, technical_rate, loaded_rate,
-                    marginal_pml)
-                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
-                [session_id, req.portfolio_id, r["property_id"], peril, "blended",
-                 pb.get("aal", 0),
-                 pb.get("oep_100", 0), pb.get("oep_250", 0), pb.get("oep_500", 0),
-                 pb.get("technical_rate_pct", 0), pb.get("loaded_rate_pct", 0), 0],
-            )
-    duck.execute(
-        """INSERT INTO cat_sessions (session_id, portfolio_id, name, status, portfolio_tiv,
-           portfolio_aal, portfolio_premium, n_properties, model_config, created_at, completed_at)
-           VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
-        [session_id, req.portfolio_id, session_name, "modelled",
-         round(portfolio_tiv, 2), round(portfolio_aal, 2), round(portfolio_premium, 2),
-         len(all_results), json.dumps({"n_years": req.n_years, "max_properties": req.max_properties}),
-         now_ts, now_ts],
-    )
-    duck.close()
+        portfolio_aal = sum(r["pricing"]["total_aal"] for r in all_results)
+        portfolio_tiv = sum(r["tiv"] for r in all_results)
+        portfolio_premium = sum(r["pricing"]["total_premium"] for r in all_results)
+
+        for r in all_results:
+            for peril in ["seismic", "flood", "wind"]:
+                pb = r["pricing"]["peril_breakdown"].get(peril, {})
+                duck.execute(
+                    """INSERT INTO cat_results
+                       (session_id, portfolio_id, property_id, peril, model_id, aal,
+                        oep_100, oep_250, oep_500, technical_rate, loaded_rate,
+                        marginal_pml)
+                       VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
+                    [session_id, req.portfolio_id, r["property_id"], peril, "blended",
+                     pb.get("aal", 0),
+                     pb.get("oep_100", 0), pb.get("oep_250", 0), pb.get("oep_500", 0),
+                     pb.get("technical_rate_pct", 0), pb.get("loaded_rate_pct", 0), 0],
+                )
+        duck.execute(
+            """INSERT INTO cat_sessions (session_id, portfolio_id, name, status, portfolio_tiv,
+               portfolio_aal, portfolio_premium, n_properties, model_config, created_at, completed_at)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
+            [session_id, req.portfolio_id, session_name, "modelled",
+             round(portfolio_tiv, 2), round(portfolio_aal, 2), round(portfolio_premium, 2),
+             len(all_results), json.dumps({"n_years": req.n_years, "max_properties": req.max_properties}),
+             now_ts, now_ts],
+        )
+    finally:
+        duck.close()
 
     return {
         "session_id": session_id,

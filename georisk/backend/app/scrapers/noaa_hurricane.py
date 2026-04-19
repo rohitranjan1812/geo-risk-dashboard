@@ -178,15 +178,15 @@ HURRICANE_TRACKS_SAMPLE = {
 def get_hurricane_tracks_geojson() -> dict:
     scraped_path = settings.CATALOG_DIR / "hurricane_tracks_scraped.geojson"
     if scraped_path.exists():
-        with open(scraped_path) as f:
+        with open(scraped_path, encoding="utf-8") as f:
             return json.load(f)
 
     filepath = settings.CATALOG_DIR / "hurricane_tracks.geojson"
     if not filepath.exists():
-        with open(filepath, "w") as f:
+        with open(filepath, "w", encoding="utf-8") as f:
             json.dump(HURRICANE_TRACKS_SAMPLE, f)
     else:
-        with open(filepath) as f:
+        with open(filepath, encoding="utf-8") as f:
             return json.load(f)
     return HURRICANE_TRACKS_SAMPLE
 

@@ -136,10 +136,10 @@ SEISMIC_HAZARD_ZONES = {
 def get_seismic_hazard_zones() -> dict:
     filepath = settings.CATALOG_DIR / "seismic_hazard_zones.geojson"
     if not filepath.exists():
-        with open(filepath, "w") as f:
+        with open(filepath, "w", encoding="utf-8") as f:
             json.dump(SEISMIC_HAZARD_ZONES, f)
     else:
-        with open(filepath) as f:
+        with open(filepath, encoding="utf-8") as f:
             return json.load(f)
     return SEISMIC_HAZARD_ZONES
 
