@@ -22,6 +22,11 @@ build/
 *.duckdb
 *.duckdb.wal
 *.duckdb.tmp
+*.agents
+*.cursor
+*.qwen
+*.trae
+*.vscode
 
 .DS_Store
 Thumbs.db
